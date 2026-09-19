@@ -1,0 +1,32 @@
+--- a/usbhost.h
++++ b/usbhost.h
+@@ -450,7 +450,13 @@
+ 
+         /* check if device is connected */
+         regWr(rHCTL, bmSAMPLEBUS); // sample USB bus
+-        while(!(regRd(rHCTL) & bmSAMPLEBUS)); //wait for sample operation to finish
++        { // Loopanini: bound this wait. With a garbage SPI link (wrong or shared chip select) regRd() can
++          // read zeros forever, and this spin then hangs a core. Init() reports -1 instead, see patches/README.md
++          uint32_t sampleTO = (uint32_t)millis() + 50;
++          while(!(regRd(rHCTL) & bmSAMPLEBUS)) {
++                  if((int32_t)((uint32_t)millis() - sampleTO) >= 0L) return ( -1);
++          }
++        } //wait for sample operation to finish
+ 
+         busprobe(); //check if anything is connected
+ 
+@@ -491,7 +497,13 @@
+ 
+         /* check if device is connected */
+         regWr(rHCTL, bmSAMPLEBUS); // sample USB bus
+-        while(!(regRd(rHCTL) & bmSAMPLEBUS)); //wait for sample operation to finish
++        { // Loopanini: bound this wait. With a garbage SPI link (wrong or shared chip select) regRd() can
++          // read zeros forever, and this spin then hangs a core. Init() reports -1 instead, see patches/README.md
++          uint32_t sampleTO = (uint32_t)millis() + 50;
++          while(!(regRd(rHCTL) & bmSAMPLEBUS)) {
++                  if((int32_t)((uint32_t)millis() - sampleTO) >= 0L) return ( -1);
++          }
++        } //wait for sample operation to finish
+ 
+         busprobe(); //check if anything is connected
+ 

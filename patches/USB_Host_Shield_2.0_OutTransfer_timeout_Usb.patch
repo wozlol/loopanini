@@ -1,0 +1,32 @@
+--- a/Usb.cpp
++++ b/Usb.cpp
+@@ -337,11 +337,13 @@
+                 bytesWr(rSNDFIFO, bytes_tosend, data_p); //filling output FIFO
+                 regWr(rSNDBC, bytes_tosend); //set number of bytes
+                 regWr(rHXFR, (tokOUT | pep->epAddr)); //dispatch packet
++                { uint32_t hxfrTO = (uint32_t)millis() + 50; // Loopanini/ARPnMIDI: bound completion wait, see patches/README.md
+                 while(!(regRd(rHIRQ) & bmHXFRDNIRQ)){
++                        if((int32_t)((uint32_t)millis() - hxfrTO) >= 0L) break;
+ #if defined(ESP8266) || defined(ESP32)
+                         yield(); // needed in order to reset the watchdog timer on the ESP8266
+ #endif
+-                } //wait for the completion IRQ
++                } } //wait for the completion IRQ
+                 regWr(rHIRQ, bmHXFRDNIRQ); //clear IRQ
+                 rcode = (regRd(rHRSL) & 0x0f);
+ 
+@@ -376,11 +378,13 @@
+                         regWr(rSNDFIFO, *data_p);
+                         regWr(rSNDBC, bytes_tosend);
+                         regWr(rHXFR, (tokOUT | pep->epAddr)); //dispatch packet
++                        { uint32_t hxfrTO2 = (uint32_t)millis() + 50; // Loopanini/ARPnMIDI: bound completion wait, see patches/README.md
+                         while(!(regRd(rHIRQ) & bmHXFRDNIRQ)){
++                                if((int32_t)((uint32_t)millis() - hxfrTO2) >= 0L) break;
+ #if defined(ESP8266) || defined(ESP32)
+                         yield(); // needed in order to reset the watchdog timer on the ESP8266
+ #endif
+-                        } //wait for the completion IRQ
++                        } } //wait for the completion IRQ
+                         regWr(rHIRQ, bmHXFRDNIRQ); //clear IRQ
+                         rcode = (regRd(rHRSL) & 0x0f);
+                 }//while( rcode && ....

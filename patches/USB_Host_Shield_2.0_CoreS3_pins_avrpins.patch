@@ -1,0 +1,17 @@
+--- a/avrpins.h
++++ b/avrpins.h
+@@ -1939,6 +1939,14 @@
+ MAKE_PIN(P18, 18); // SCK
+ MAKE_PIN(P5, 5); // SS
+ MAKE_PIN(P17, 17); // INT
++// Loopanini: M5Stack Module USB v1.2 on CoreS3. The chip select and INT GPIOs come from
++// config.h so there is exactly one place to change them, and it is visible to every
++// translation unit of this library (they all reach this file through Usb.h). The pin
++// budget table in config.h explains which DIP switch positions are safe next to
++// ModuleAudio, see also FIRMWARE_PLAN.md and patches/README.md.
++#include "../config.h"
++MAKE_PIN(P_LOOPANINI_CS, LOOPANINI_USB_HOST_CS_GPIO);
++MAKE_PIN(P_LOOPANINI_INT, LOOPANINI_USB_HOST_INT_GPIO);
+ 
+ #endif
+ 

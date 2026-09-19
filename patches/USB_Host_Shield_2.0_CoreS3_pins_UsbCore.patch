@@ -1,0 +1,18 @@
+--- a/UsbCore.h
++++ b/UsbCore.h
+@@ -51,7 +51,14 @@
+ #elif defined(ARDUINO_XIAO_ESP32S3)
+ typedef MAX3421e<P44, P4> MAX3421E; // ESP32 XIAO boards
+ #elif defined(ESP32)
+-typedef MAX3421e<P5, P17> MAX3421E; // ESP32 boards
++// Loopanini: M5Stack Module USB v1.2 on CoreS3. Stock CS=GPIO5/INT=GPIO17
++// aren't CoreS3 switch options at all. The real pins come from config.h via
++// avrpins.h (P_LOOPANINI_CS / P_LOOPANINI_INT), see the pin budget table in
++// config.h before changing them: two of the three SS positions collide with
++// ModuleAudio on the shared M-Bus. This vendored copy is only ever built for
++// CoreS3, so the generic ESP32 default is changed in place rather than added
++// as a new branch. See FIRMWARE_PLAN.md and patches/README.md.
++typedef MAX3421e<P_LOOPANINI_CS, P_LOOPANINI_INT> MAX3421E; // M5Stack CoreS3 + Module USB v1.2
+ #elif defined(ARDUINO_Seeed_XIAO_nRF52840_Sense)
+ typedef MAX3421e<P7, P5> MAX3421E; // Seeed_XIAO_nRF52840_Sense
+ #elif defined(MIGHTYCORE)
