@@ -471,10 +471,10 @@ Draft from the 2026-09-21 UX pass. Five screens, always in this order:
 - Bottom touch band: tap or swipe the left side to go to the previous screen,
   the right side to go to the next. Wraps or stops at the ends, decide when
   built.
-- **Verify on hardware first.** An earlier note in this plan says CoreS3 has no
-  touch area below the glass. The UX assumes the touch area extends below the
-  display. Test where touch coordinates actually register, and if it stops at
-  the glass, draw the band as the bottom strip of the screen.
+- **Confirmed (hardware and public docs):** the touch area is 320 x 280, the
+  display is 320 x 240, so the bottom 40 px (y 240 to 279) is a touch only
+  strip below the glass. Nav taps and swipes live in that strip, nothing is
+  drawn there, so no on screen prev and next buttons are needed.
 - Every edit or sub screen has the same **X in the upper left** to go back.
 - Labels are abbreviated so buttons stay big. Use M5Unified and M5GFX drawing,
   no LVGL for the first version. Use known working snippets and examples for
@@ -568,6 +568,8 @@ activate it, release to stop. Target (looper, AMY synth or main) is a setting.
 ### 5. Config
 Uses the parameter list menu. Settings so far:
 - Time signature: 4/4 or 3/4.
+- Limiter release (ms), one global value used by every limiter instance in the
+  mixer (MGA_JSLimiter release, default 200).
 - Looper auto overdub: on or off.
 - Looper time machine mode: on or off.
 - Time machine gap: 0 to 4 beats.
@@ -580,7 +582,6 @@ Uses the parameter list menu. Settings so far:
   routing, factory reset.
 
 ### Open UI questions
-- Does the touch area really extend below the glass on CoreS3 (see above).
 - What Play and Stop show while armed or during pre-roll besides the labels.
 - Screen order wraparound.
 - Exact stutter division list and layout (see Beat stutter).
