@@ -464,30 +464,114 @@ its own independent player:
 
 ## Touch UI
 
-- Real hardware note, corrected from the original assumption: CoreS3 does
-  not have a capacitive strip below the display the way Core2 does, touch
-  only registers on the actual display glass, right down to its lower rim.
-  So there is no separate physical swipe sensor to use.
-- The practical equivalent: reserve a slim band at the very bottom of the
-  visible screen, roughly the bottom two dozen pixels, as a persistent
-  horizontal swipe zone present on every screen. Swipe there to move between
-  the main looper screen and the looper settings screen. It behaves like a
-  dedicated swipe strip even though it's drawn pixels rather than a separate
-  sensor.
-- Labels are abbreviated everywhere so buttons can stay big enough to hit
-  reliably, easy to press beats pretty for this pass. Lean on M5Unified and
-  M5GFX's own examples for button and label drawing rather than pulling in a
-  full widget toolkit like LVGL for the first version.
-- Main screen only carries Arm/Play/Rec, Stop/Clear/Undo, the state icon,
-  and enough level feedback to be useful, nothing that risks being tapped by
-  accident during normal playing.
-- Looper settings screen, reached only by the swipe, carries bar count or
-  Free, time signature, BPM and clock source, overdub setting, input source
-  (Ext, Int, Both), mic source (ModuleAudio jack, CoreS3 onboard), output
-  routing (ModuleAudio, CoreS3 speaker, or auto if the jack detect open item
-  pans out), and the threshold setting if it gets promoted there.
-- Mixer and Comp get their own screen(s) reached the same swipe way, not
-  crowding the main or looper settings screens.
+Draft from the 2026-09-21 UX pass. Five screens, always in this order:
+**1 Mixer, 2 AMY synth, 3 Looper, 4 Stutter, 5 Config.**
+
+### Navigation
+- Bottom touch band: tap or swipe the left side to go to the previous screen,
+  the right side to go to the next. Wraps or stops at the ends, decide when
+  built.
+- **Verify on hardware first.** An earlier note in this plan says CoreS3 has no
+  touch area below the glass. The UX assumes the touch area extends below the
+  display. Test where touch coordinates actually register, and if it stops at
+  the glass, draw the band as the bottom strip of the screen.
+- Every edit or sub screen has the same **X in the upper left** to go back.
+- Labels are abbreviated so buttons stay big. Use M5Unified and M5GFX drawing,
+  no LVGL for the first version. Use known working snippets and examples for
+  sliders, meters, number pads and scrolling, do not invent widgets.
+
+### Shared widgets
+- **Parameter list menu** (used by Config, AMY edit screens and others): rows
+  of name and value, tap a row to edit. Scroll bar on the right with up and down
+  buttons. The bar is split into equal segments, one per page (3 pages = 3
+  segments), tap a segment to jump to that page.
+- **Value editor** (opens from a tapped row): full screen number pad, plus up
+  and down buttons, plus a live value readout, X to go back. Used for BPM,
+  Measures, synth parameters and channel numbers. BPM also gets a tap tempo
+  button.
+
+### 1. Mixer
+Four equal vertical columns, left to right:
+`AMY synth master out`, `Aux in monitor`, `Looper output`, `Main out`
+(USB and aux audio out).
+
+Each column has:
+- A skinny tall touch slider with a vertical level meter. The peak leaves a
+  held mark near the top for a moment, like a classic VU or peak hold.
+- To the right of the slider, three stacked buttons, equally spaced, close to
+  the slider: **top = Mute**, **middle = Limiter ceiling**, **bottom = loop
+  record enable** (a loop arrow symbol, on means this channel is recorded into
+  the looper).
+- Middle button cycles the limiter ceiling 0, -1, -2, -3, -4, -5, -6 dB and
+  back to 0. The limiter is always on, at 0 dB it is a brick wall so nothing
+  clips. Copy the LOSER "Simple Peak-1 Limiter" (Samelot/Reaper, Effects/LOSER,
+  SP1LimiterJS). The fetched JSFX source (threshold in dB, `thresh =
+  exp(dB / 8.65617)`, a smoothed peak envelope with roughly a 10 Hz low pass,
+  `gain = max(envelope, thresh)`, output divided by gain) may be missing lines
+  such as final makeup, so re-read the original file and reproduce it exactly
+  when implemented.
+- **Column 4 (Main out) bottom button is not a loop toggle.** Main must never
+  feed back into the looper input. That button turns on the **pumping
+  compressor**: fast attack, slow release, release length equal to one beat at
+  the current BPM, giving a classic NY style pump that a loud kick can drive.
+  Not a literal sidechain, it works off the signal itself. Specify the
+  detector, ratio and depth when built, and tie release to BPM (internal or
+  MIDI clock).
+- Signal path detail (where the loop record taps sit, and the aux monitor
+  versus recorded aux) is settled in the Mixer section.
+
+### 2. AMY synth
+- Summary page: a 2x2 grid of channels **1, 2, 3, 10**. Each cell shows the
+  instrument or sample name and volume. Tap a cell to edit.
+- Edit page uses the parameter list menu: synth engine or type, its
+  parameters, MIDI channel, volume. Number entry uses the value editor.
+- The best parameter layout for AMY is not yet known. Read AMY's patch and
+  oscillator parameters and design pages from what it really exposes, then
+  revisit.
+
+### 3. Looper
+A 4x2 grid. Top row: the four snapshot slots (loop banks). Bottom row, left to
+right: **BPM, Measures, Stop, Play**.
+- **BPM** opens the value editor (number pad, up and down, tap tempo).
+- **Measures** shows 1 to 8, tap opens the value editor.
+- **Stop button** changes role with state: playing = STOP, stopped = CLEAR,
+  cleared = UNDO.
+- **Play button** changes role with state:
+  - Normal mode: playing = OVERDUB toggle, stopped = PLAY, cleared = ARM,
+    armed = REC NOW. ARM waits and starts recording when it hears audio. REC NOW
+    starts recording immediately.
+  - Time machine mode: playing = OVERDUB toggle, stopped = PLAY, cleared =
+    CAPTURE. CAPTURE saves audio that already happened, so the loop is taken
+    from the always running rolling buffer. If the buffer is silent or not
+    long enough yet, ignore the press and show a red indication.
+- **Time machine gap (0 to 4 beats):** start the captured loop earlier so it
+  ends just before the moment the Play button was pressed, by that many beats.
+- Time machine mode changes the Play button pattern as above, it is a Config
+  setting.
+
+### 4. Stutter
+See Beat stutter. A grid of beat divisions. Press and hold a division to
+activate it, release to stop. Target (looper, AMY synth or main) is a setting.
+
+### 5. Config
+Uses the parameter list menu. Settings so far:
+- Time signature: 4/4 or 3/4.
+- Looper auto overdub: on or off.
+- Looper time machine mode: on or off.
+- Time machine gap: 0 to 4 beats.
+- Audio out: USB, aux, or both.
+- SD recording: on or off (setting only for now, implemented late).
+- BPM auto from MIDI clock: on or off.
+- Record start position setting sits at the top of the list.
+- Candidates not yet decided: input source (Ext, Int, Both), mic source,
+  threshold, limiter and compressor defaults, screen brightness, MIDI channel
+  routing, factory reset.
+
+### Open UI questions
+- Does the touch area really extend below the glass on CoreS3 (see above).
+- What Play and Stop show while armed or during pre-roll besides the labels.
+- Screen order wraparound.
+- Exact stutter division list and layout (see Beat stutter).
 
 ## Beat stutter
 
