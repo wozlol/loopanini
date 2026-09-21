@@ -12,6 +12,7 @@
 #include "config.h"
 #include "debug_io.h"
 #include "pin_guard.h"
+#include "spi_lock.h"
 
 // Declared the same way midi_io.cpp does, see that file's comment.
 extern "C" {
@@ -52,6 +53,7 @@ bool begin() {
 
   usb = new (usbStorage) USB();
   midi = new USBH_MIDI(usb);
+  spi_lock::Guard lock;
   if (usb->Init() == -1) {
     debug_io::out().println(
         "midi_host: MAX3421E did not answer. Check Module USB v1.2 is seated, its SS Select and INT "
@@ -78,6 +80,7 @@ void poll() {
   // Guard on the pointers themselves, not just `ready`: with the feature
   // disabled they are never assigned, and the compiler can see that.
   if (!ready || usb == nullptr || midi == nullptr) return;
+  spi_lock::Guard lock;
   usb->Task();
   static uint8_t lastState = 0xFF, lastVbus = 0xFF;
   static bool lastConn = false;

@@ -52,7 +52,9 @@
 #include "src/midi_host.h"
 #include "src/midi_io.h"
 #include "src/pin_guard.h"
+#include "src/spi_lock.h"
 #include "src/synth_engine.h"
+#include "src/ui.h"
 #include "src/usb_audio_out.h"
 
 namespace {
@@ -166,6 +168,7 @@ void audioTask(void *) {
     midi_io::poll();
     midi_din::poll();
     int16_t *block = synth_engine::renderBlock();
+    ui::processBlock(block, AMY_BLOCK_SIZE);
     if (!audio_io::writeBlock(block, AMY_BLOCK_SIZE)) {
       write_failures = write_failures + 1;
       // A failed write returns immediately instead of blocking on the I2S
@@ -274,11 +277,11 @@ void setup() {
   stageCheck("after USB host", 3000);
 
   printBootSummary();
+  ui::begin();
 }
 
 void loop() {
-  // Core 1 is reserved for the touch UI, which doesn't exist yet. Until it
-  // does, this just serves the serial commands.
+  ui::update();
   pollCommands();
-  delay(20);
+  delay(5);
 }
