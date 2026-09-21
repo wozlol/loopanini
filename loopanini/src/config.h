@@ -145,3 +145,14 @@
 #define LOOPANINI_USB_HOST_TASK_CORE 1
 #define LOOPANINI_USB_HOST_TASK_PRIORITY 1
 #define LOOPANINI_USB_HOST_TASK_STACK_BYTES 8192
+
+// Looper arm trigger: peak level (0 to 1) of the looper input that starts a
+// recording after ARM. 0.02 is about -34 dBFS. Raise it if noise starts takes.
+#ifndef LOOPANINI_LOOPER_ARM_THRESHOLD
+#define LOOPANINI_LOOPER_ARM_THRESHOLD 0.02f
+#endif
+
+// Longest loop the looper buffer holds, seconds of stereo audio in PSRAM.
+#ifndef LOOPANINI_LOOPER_MAX_SECONDS
+#define LOOPANINI_LOOPER_MAX_SECONDS 16
+#endif

@@ -18,4 +18,8 @@ void begin();
 // from more than one task.
 int16_t *renderBlock();
 
+// Live parameter changes from the UI. Safe from any task (amy_add_event queues).
+void setPatch(int synth, int patch);
+void setLevel(int synth, float level0to1);
+
 }  // namespace synth_engine

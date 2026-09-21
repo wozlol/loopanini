@@ -464,7 +464,7 @@ its own independent player:
 
 ## Touch UI
 
-**Status 2026-09-21:** first UI pass is in the sketch (`src/ui.cpp`), builds, not yet run on hardware. Live: strip navigation, mixer fader and mute for synth and main (applied to the audio), meters with peak hold, number pad editor with tap tempo, config list with page bar, looper state machine (UI only, no audio), stutter hold grid (state only), AMY 2x2 summary and channel edit (state only). Not wired yet: limiters, pump compressor, aux and looper channels, stutter audio, AMY parameters. LCD and Module USB share the SPI pads, so `src/spi_lock.h` serializes them, check on hardware that the screen and USB host both keep working together.
+**Status 2026-09-21 (second pass, builds, not yet run on hardware):** mixer redone (INT EXT LOP ALL, full height faders with round handles, round Mute Solo Limiter Rec buttons, LOP has no rec button since it would feed back, all faders default to full, unity gain at the top). Looper core is real now (`src/looper.cpp`, runs in the audio task): ARM waits for the input to pass a threshold (`LOOPANINI_LOOPER_ARM_THRESHOLD` in config.h), records the INT synth for Measures at the BPM, plays back through LOP, overdubs, Time Machine capture with gap, CLEAR then UNDO. Loop audio lives in PSRAM, 16 s max. Not done: loop slots, pre-roll, EXT input, limiters, pump compressor, stutter audio. AMY patch and volume from the AMY screen now send events, MIDI channel change does not. LCD and Module USB share the SPI pads, `src/spi_lock.h` serializes them.
 
 Draft from the 2026-09-21 UX pass. Five screens, always in this order:
 **1 Mixer, 2 AMY synth, 3 Looper, 4 Stutter, 5 Config.**
