@@ -510,6 +510,18 @@ Each column has:
   `gain = max(envelope, thresh)`, output divided by gain) may be missing lines
   such as final makeup, so re-read the original file and reproduce it exactly
   when implemented.
+  **Better candidate found, same LOSER folder: `MGA_JSLimiter`** (Michael
+  Gruhn, GPL v3). Read from source: no delay line, it is not truly look ahead.
+  It takes the peak of both channels, keeps two overlapping peak hold windows
+  of `srate/128` samples (about 8 ms at 48 kHz), and takes the larger as the
+  target envelope. Attack is instant (envelope jumps to a higher peak the same
+  sample), release is a one pole decay `r = exp(-3 / (srate * max(release,
+  0.05)))`, release default 200 ms. Gain is `thresh / env` times
+  `ceiling / thresh` whenever the envelope is above threshold. So the output
+  never exceeds the ceiling, which is what the always on brick wall needs, and
+  the Mixer ceiling button (0 to -6 dB) maps directly to its Ceiling slider.
+  Plan: use MGA_JSLimiter for the ceiling limiter, keep SP1 as a reference.
+  It is GPL v3, keep the notice if the code is ported closely.
 - **Column 4 (Main out) bottom button is not a loop toggle.** Main must never
   feed back into the looper input. That button turns on the **pumping
   compressor**: fast attack, slow release, release length equal to one beat at
