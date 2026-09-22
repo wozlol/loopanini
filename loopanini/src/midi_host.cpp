@@ -13,6 +13,7 @@
 #include "debug_io.h"
 #include "pin_guard.h"
 #include "spi_lock.h"
+#include "synth_engine.h"
 
 // Declared the same way midi_io.cpp does, see that file's comment.
 extern "C" {
@@ -101,7 +102,7 @@ void poll() {
   while ((len = midi->RecvData(msg)) > 0) {
     debug_io::out().printf("USB host MIDI in: %02X %02X %02X\n", msg[0],
                             len > 1 ? msg[1] : 0, len > 2 ? msg[2] : 0);
-    convert_midi_bytes_to_messages(msg, len, /*usb=*/1);
+    if (len < 3 || !synth_engine::routeDrumNote(msg)) convert_midi_bytes_to_messages(msg, len, /*usb=*/1);
   }
 }
 

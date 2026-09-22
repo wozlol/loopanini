@@ -692,6 +692,94 @@ configured times.
 - SD card holds the kit files and is only touched at boot or on a kit change,
   loading is chunked on core 1 so it can't stall audio.
 
+### Status 2026-09-22: SD sample cache, built and building
+
+`src/sample_bank.cpp` reads 16 bit PCM WAV files off the SD card with the SD
+library and calls AMY's own `pcm_load()` (declared in `amy.h`, the same C
+function AMY's `load_sample` wire command calls internally, so this is AMY's
+documented direct path, not a workaround) to allocate each sample's RAM and
+fill it once. `synth_engine::begin()` sets `amy_config.ram_caps_sample =
+MALLOC_CAP_SPIRAM` so that RAM is PSRAM, not AMY's small internal-RAM default
+on non-Tulip/AMYboard builds. After that first load, a repeated hit plays from
+PSRAM, the SD card is never touched again until a kit changes. SD comes up on
+its own SPI bus with the exact pin lookup and GPIO4 fallback M5Unified's own
+`Speaker_SD_wav_file` example uses (that bus is separate from the CoreS3
+LCD/Module USB SPI pads in the pin budget above).
+
+**How this compares to the Blackbox mk1 and SamplerBox**, since both do the
+same "WAV files on a card become playable pads/notes" job differently:
+- **1010music Blackbox** stores samples inside a *project*: each pad or track
+  cell in the Blackbox's own project file references a WAV by path, and the
+  unit streams from its SD card during playback (its "Cell" sample player is
+  disk streaming, not a RAM bank), so it can hold far more sample data than
+  RAM but a very fast repeated hit can be limited by the card's read speed.
+  There is no plain "drop files in a folder, note number picks the file"
+  scheme, the project file is the source of truth for what plays where.
+- **SamplerBox** (the Pi/Python project) is the closer relative: one folder
+  per instrument/kit, and the WAV filenames inside it encode the mapping,
+  typically a leading MIDI note number (and a velocity layer suffix on some
+  forks), so "36 kick.wav" plays on note 36. It fully preloads that folder
+  into RAM at startup for exactly the reason we do: no disk I/O once a
+  performance starts.
+- **Loopanini** follows SamplerBox's convention on purpose, since it is the
+  simplest correct mapping for a folder of drum one-shots and needs no
+  authoring tool: `LOOPANINI_SD_KIT_DIR` (`/kits/000` by default, in
+  `config.h`) is a flat folder of WAVs, each filename's leading digits are
+  the MIDI note it plays on (`"36 Kick.wav"`, `"36_Kick.wav"`, `"36.wav"` all
+  parse to 36), loaded into PSRAM at boot with `synth_engine::loadDrumKit()`.
+  Unlike SamplerBox we route through AMY's own PCM engine (`pcm_load()` plus
+  a raw `wave=PCM` osc event per hit) rather than a custom mixer, so pitch,
+  looping and AMY's other PCM modes are still available per sample if we
+  extend the mapping later, and drum hits sit in the same signal chain
+  (mixer, limiter, stutter) as everything else in Loopanini.
+- `sample_bank::loadPitchedSample(chIndex, path)` is the same PSRAM-cached
+  loader for a single sample on one of channels 1 to 3 (preset numbers
+  `LOOPANINI_PITCHED_PRESET_BASE + chIndex`), native pitch defaults to C4;
+  not wired to any UI control yet, see below.
+
+**What plays through the sample layer versus AMY's built in synths:** a
+channel 10 note whose number has a loaded sample plays from PSRAM through a
+small dedicated pool of raw oscillators (`LOOPANINI_DRUM_OSC_BASE`,
+`LOOPANINI_DRUM_OSC_COUNT` in `config.h`, 8 voices of simultaneous one-shot
+polyphony by default, round robin, reserved well clear of what
+`default_synths` allocates for the Juno/DX7/kit synths so they never fight
+over oscillators) so a rapid hi hat roll doesn't steal a voice from the
+melodic synths. A channel 10 note with no loaded sample still plays AMY's own
+baked in TR-808 kit as before, so a partial kit (say, only a kick and snare on
+SD) is fine. `synth_engine::routeDrumNote()` is the single choke point that
+decides sample layer versus AMY for a note; it is wired into both the USB
+device MIDI path (`midi_io.cpp`) and the USB host MIDI path (`midi_host.cpp`)
+today. **DIN MIDI is not wired yet**, since `midi_din.cpp` reads MIDI a byte
+at a time and reassembling channel-voice messages from that stream needs a
+small running-status parser this pass didn't add; a DIN-triggered channel 10
+note currently always goes to AMY's baked in kit even if a sample is loaded
+for that note.
+
+**MIDI channel change from the AMY screen is now live**, it calls AMY's
+`to_synth` to actually move the synth, tracked per UI slot so later patch and
+volume edits keep addressing the right synth number after a move (this needed
+a small fix mid-build: the UI's per-slot synth number has to update when
+`to_synth` fires, or the next patch/volume edit would silently address the
+old, now-vacated synth number).
+
+**Not done yet, scoped out of this pass:**
+- No UI for browsing or picking a kit folder, loading a pitched sample, or
+  seeing what's mapped where. `LOOPANINI_SD_KIT_DIR` is compile-time only.
+- Only one WAV per note (no velocity layers, no round robin per hit), and
+  only one WAV per pitched channel (no keyboard zones/splits). AMY's own PCM
+  engine supports more of this per preset already (loop points, `PCM_LEFT`/
+  `PCM_RIGHT` for true stereo via two oscs and pan, `disk_sample` streaming
+  for files too big to fit in PSRAM), extend `sample_bank` into that as
+  needed rather than reinventing it.
+- Real AMY parameter editing beyond patch number, MIDI channel and volume
+  (filter, envelope, effects per engine) is still just the three field list
+  from UI pass 2, the plan doesn't yet describe what a fuller per-engine
+  parameter screen should look like, revisit once the mixer and looper are
+  solid.
+- 16 bit PCM (or WAVE_FORMAT_EXTENSIBLE with a PCM subformat) WAV only, mono
+  or stereo. 24 bit, float, or compressed WAV are refused with a debug
+  message rather than played back wrong.
+
 ## Status LEDs
 
 Phase one: WS2812B reflects loop state color (armed, recording, overdubbing,

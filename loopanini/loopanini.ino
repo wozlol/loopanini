@@ -52,6 +52,7 @@
 #include "src/midi_host.h"
 #include "src/midi_io.h"
 #include "src/pin_guard.h"
+#include "src/sample_bank.h"
 #include "src/spi_lock.h"
 #include "src/synth_engine.h"
 #include "src/ui.h"
@@ -257,6 +258,13 @@ void setup() {
 
   synth_engine::begin();
   debug_io::out().println("loopanini: AMY started.");
+
+  // SD card is optional: no card, no kits folder, or nothing matching just
+  // means channel 10 stays on AMY's baked in drum kit and channels 1-3 stay
+  // on Juno/DX7/piano patches, see FIRMWARE_PLAN.md's Synth and sampler.
+  if (sample_bank::begin()) {
+    synth_engine::loadDrumKit(LOOPANINI_SD_KIT_DIR);
+  }
 
   // Staged bring up: audio runs alone first, then each optional input is
   // enabled in turn with a health check after each, so if the audio breaks

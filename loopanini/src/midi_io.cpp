@@ -7,6 +7,7 @@
 #include "USBMIDI.h"
 
 #include "debug_io.h"
+#include "synth_engine.h"
 
 // Declared the same way AMY's own AMY_USB_Host_MIDI example declares it:
 // amy_midi.h isn't part of AMY-Arduino.h's public include chain, so this
@@ -46,7 +47,9 @@ void poll() {
     // and what AMY is being handed, versus a silent USB-only problem
     // upstream. Fine to remove once phase 1 is confirmed working.
     debug_io::out().printf("USB MIDI in: %02X %02X %02X\n", bytes[0], bytes[1], bytes[2]);
-    convert_midi_bytes_to_messages(bytes, 3, /*usb=*/1);
+    // Channel 10 notes covered by an SD loaded kit play from our own PCM
+    // sample layer instead of AMY's baked in drum synth, see synth_engine.h.
+    if (!synth_engine::routeDrumNote(bytes)) convert_midi_bytes_to_messages(bytes, 3, /*usb=*/1);
   }
 }
 

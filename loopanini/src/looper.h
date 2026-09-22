@@ -36,9 +36,10 @@ bool overdubbing();
 bool undoAvailable();
 uint32_t rejectCount();       // bumps when a Capture is refused (silent or too short)
 
-// Audio task. `io` is interleaved stereo, the looper input on entry and the
-// mix (input plus loop playback) on return. `recordInput` says whether that
-// input is armed for the looper. Returns the peak of the playback (0 to 1).
-float process(int16_t *io, int frames, bool recordInput, float returnGain);
+// Audio task. `io` is interleaved stereo looper input, left unchanged.
+// `recordInput` says whether that input is armed for the looper. The loop
+// playback (times returnGain) is written to `loopOut`, stereo, `frames` long,
+// zero when nothing plays. Returns the peak of the playback (0 to 1).
+float process(const int16_t *io, int frames, bool recordInput, float returnGain, int16_t *loopOut);
 
 }  // namespace looper

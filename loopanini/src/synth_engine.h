@@ -21,5 +21,22 @@ int16_t *renderBlock();
 // Live parameter changes from the UI. Safe from any task (amy_add_event queues).
 void setPatch(int synth, int patch);
 void setLevel(int synth, float level0to1);
+void setChannel(int synth, int newChannel);  // moves a synth to a different MIDI channel (to_synth)
+
+// Loads a kit from LOOPANINI_SD_KIT_DIR (see sample_bank.h) and switches
+// channel 10 to sample playback for any note the kit covers; notes the kit
+// doesn't cover still hit the normal baked in drum synth. Safe to call again
+// to swap kits. Returns the number of samples loaded (0 means no usable kit
+// was found, channel 10 stays on the baked in kit).
+int loadDrumKit(const char *dir);
+
+// Called once per incoming 3 byte MIDI channel-voice message (note on/off)
+// before it would otherwise be forwarded to AMY. Returns true if it was a
+// channel 10 note on/off for a loaded sample and has been handled (the
+// caller must not also forward it to AMY), false to forward as normal.
+// USB device and USB host MIDI both come through as whole 3 byte messages,
+// see midi_io.cpp and midi_host.cpp; DIN MIDI is a byte stream, not routed
+// through this yet, see FIRMWARE_PLAN.md.
+bool routeDrumNote(const uint8_t *msg3);
 
 }  // namespace synth_engine

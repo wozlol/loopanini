@@ -8,6 +8,7 @@
 
 #include "looper.h"
 #include "spi_lock.h"
+#include "stutter.h"
 #include "synth_engine.h"
 
 namespace ui {
@@ -83,7 +84,8 @@ struct AmyCh {
 };
 AmyCh amy[4] = {{1, 0, 100}, {2, 1, 100}, {3, 2, 100}, {10, 0, 100}};
 AmyCh amySeen[4] = {{1, 0, 100}, {2, 1, 100}, {3, 2, 100}, {10, 0, 100}};
-const int kSynthId[4] = {1, 2, 3, 10};
+int amyChanSeen[4] = {1, 2, 3, 10};
+int amySynthId[4] = {1, 2, 3, 10};  // current AMY synth number per UI slot, moves with to_synth
 int amyEdit = -1;
 Param amyParams[3];
 
@@ -613,15 +615,24 @@ void pushLooperParams() {
   looper::params.autoOverdub = cfgAutoOd;
 }
 
+void pushStutter() { stutter::set(stutHeld, cfgStutTrack); }
+
 void applyAmy() {
   for (int i = 0; i < 4; i++) {
+    if (amy[i].chan != amyChanSeen[i]) {
+      // to_synth moves the synth to a new MIDI channel number, addressed by
+      // its current number (amySynthId[i]) before the move.
+      synth_engine::setChannel(amySynthId[i], amy[i].chan);
+      amySynthId[i] = amy[i].chan;
+      amyChanSeen[i] = amy[i].chan;
+    }
     if (amy[i].patch != amySeen[i].patch) {
       amySeen[i].patch = amy[i].patch;
-      if (kSynthId[i] != 10) synth_engine::setPatch(kSynthId[i], amy[i].patch);
+      if (amySynthId[i] != 10) synth_engine::setPatch(amySynthId[i], amy[i].patch);
     }
     if (amy[i].vol != amySeen[i].vol) {
       amySeen[i].vol = amy[i].vol;
-      synth_engine::setLevel(kSynthId[i], amy[i].vol / 100.0f);
+      synth_engine::setLevel(amySynthId[i], amy[i].vol / 100.0f);
     }
   }
 }
@@ -673,6 +684,7 @@ void tick(uint32_t now) {
 
 void begin() {
   looper::begin();
+  stutter::begin();
   track.createSprite(kTrackW, kTrackH);
   dirty = true;
 }
@@ -696,6 +708,7 @@ void update() {
     if (stutHeld >= 0) stutHeld = -1, dirty = true;
     dragCol = -1;
   }
+  pushStutter();
   tick(now);
   if (dirty) {
     dirty = false;
@@ -717,7 +730,16 @@ void processBlock(int16_t *b, int frames) {
     if (a > p0) p0 = a;
     b[i] = (int16_t)s;
   }
-  const float p2 = looper::process(b, frames, gRecEnable[0], g2);
+  static int16_t loopOut[2 * 1024];
+  if (frames > 1024) frames = 1024;
+  const float p2 = looper::process(b, frames, gRecEnable[0], g2, loopOut);
+
+  stutter::apply(b, frames, stutter::T_SYNTH);
+  stutter::apply(loopOut, frames, stutter::T_LOOPER);
+  for (int i = 0; i < frames * 2; i++) {
+    int32_t m = (int32_t)b[i] + loopOut[i];
+    b[i] = (int16_t)(m > 32767 ? 32767 : (m < -32768 ? -32768 : m));
+  }
 
   int p3 = 0;
   for (int i = 0; i < frames * 2; i++) {
@@ -728,6 +750,7 @@ void processBlock(int16_t *b, int frames) {
     if (s < -32768.0f) s = -32768.0f;
     b[i] = (int16_t)s;
   }
+  stutter::apply(b, frames, stutter::T_MAIN);
   const float f0 = p0 / 32768.0f, f3 = p3 / 32768.0f;
   if (f0 > gPeak[0]) gPeak[0] = f0;
   if (p2 > gPeak[2]) gPeak[2] = p2;

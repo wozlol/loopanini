@@ -156,7 +156,8 @@ bool overdubbing() { return od; }
 bool undoAvailable() { return undoable; }
 uint32_t rejectCount() { return rejects; }
 
-float process(int16_t *io, int frames, bool recordInput, float returnGain) {
+float process(const int16_t *io, int frames, bool recordInput, float returnGain, int16_t *loopOut) {
+  for (int i = 0; i < frames * 2; i++) loopOut[i] = 0;
   service();
   if (!buf) return 0.0f;
 
@@ -205,8 +206,8 @@ float process(int16_t *io, int frames, bool recordInput, float returnGain) {
           p[0] = clip16((int32_t)p[0] + inL);
           p[1] = clip16((int32_t)p[1] + inR);
         }
-        io[2 * f] = clip16(io[2 * f] + oL);
-        io[2 * f + 1] = clip16(io[2 * f + 1] + oR);
+        loopOut[2 * f] = clip16(oL);
+        loopOut[2 * f + 1] = clip16(oR);
         if (++pos >= loopLen) pos = 0;
         break;
       }

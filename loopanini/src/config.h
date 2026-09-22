@@ -156,3 +156,28 @@
 #ifndef LOOPANINI_LOOPER_MAX_SECONDS
 #define LOOPANINI_LOOPER_MAX_SECONDS 16
 #endif
+
+// SD sample cache (channel 10 drums, and single-sample pitched channels).
+// See sample_bank.h and FIRMWARE_PLAN.md's Synth and sampler section.
+#ifndef LOOPANINI_SD_KIT_DIR
+#define LOOPANINI_SD_KIT_DIR "/kits/000"  // auto-loaded at boot if present
+#endif
+// PCM preset numbers we hand out for SD-loaded samples. Picked well clear of
+// the baked-in TR-808 bank (0-10) and AMY's synth patch numbers (0-255 Juno/
+// DX7, 256 piano, 1024+ user patches), which are a separate namespace from
+// PCM presets but easier to reason about kept apart anyway.
+#ifndef LOOPANINI_DRUM_PRESET_BASE
+#define LOOPANINI_DRUM_PRESET_BASE 2000  // + MIDI note number, one per drum
+#endif
+#ifndef LOOPANINI_PITCHED_PRESET_BASE
+#define LOOPANINI_PITCHED_PRESET_BASE 3000  // + channel index 0..2, one sample per channel
+#endif
+// Reserved raw oscillators for round robin drum sample playback, so hits
+// don't fight the default Juno/DX7/kit synths for voices. max_oscs is 250 by
+// default (amy_default_config), default_synths uses well under 200 of them.
+#ifndef LOOPANINI_DRUM_OSC_BASE
+#define LOOPANINI_DRUM_OSC_BASE 240
+#endif
+#ifndef LOOPANINI_DRUM_OSC_COUNT
+#define LOOPANINI_DRUM_OSC_COUNT 8  // simultaneous drum hits
+#endif
