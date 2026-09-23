@@ -631,6 +631,17 @@ through the analog output at the same time may well want those two at
 different levels. Touch drag vertical faders, using the actual screen space
 rather than tiny numeric steppers.
 
+### Status 2026-09-23 (second pass): mixer polish
+
+Main out's Solo spot (soloing the final mix has no meaning) is now a hollow
+toggle button showing one letter, L, S, M or A, that cycles and mirrors
+Config's Stutter Track setting, so which input the stutter grid acts on can
+be flipped from the Mixer screen without a trip to Config. Round mixer button
+text nudged 1px down and right (Mute, Solo, Limiter, the Pump button, this new
+toggle), the loop-record buttons (icon only, no text) are unchanged. The 4
+fader handles moved 1px left. The 3 vertical divider lines between columns are
+gone.
+
 ### Status 2026-09-23: aux in is live
 
 `audio_io::readBlock()` is now called every audio block, so EXT (ModuleAudio's

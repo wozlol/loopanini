@@ -166,7 +166,20 @@ void button(const Rect &r, const char *label, uint16_t fill, uint16_t fg = kWhit
 
 void circleButton(const Rect &r, const char *label, uint16_t fill, uint16_t fg = kWhite, float size = 2) {
   M5.Display.fillCircle(r.x + r.w / 2, r.y + r.h / 2, r.w / 2, fill);
-  text(label, r.x + r.w / 2, r.y + r.h / 2, size, fg, fill);
+  text(label, r.x + r.w / 2 + 1, r.y + r.h / 2 + 1, size, fg, fill);
+}
+
+// Outline only, background colored inside so it reads as hollow against the
+// mixer's black background. Used for the stutter-target toggle, the one
+// mixer button that isn't a solid fill like the others.
+void circleButtonHollow(const Rect &r, const char *label, uint16_t ring, uint16_t fg = kWhite,
+                         float size = 2) {
+  auto &d = M5.Display;
+  const int cx = r.x + r.w / 2, cy = r.y + r.h / 2, rad = r.w / 2;
+  d.fillCircle(cx, cy, rad, kBg);
+  d.drawCircle(cx, cy, rad, ring);
+  d.drawCircle(cx, cy, rad - 1, ring);
+  text(label, cx + 1, cy + 1, size, fg, kBg);
 }
 
 void triangle(int cx, int cy, int half, bool up, uint16_t color) {
@@ -228,7 +241,7 @@ void drawTrack(int c) {
   }
   if (hv > 1) track.fillRect(kTrackW / 2 - 4, kTrackH - hv, 8, 2, kWhite);
   const int cy = kTrackW / 2 + (int)((1.0f - gLevel[c]) * (kTrackH - kTrackW));
-  track.fillCircle(kTrackW / 2, cy, kTrackW / 2, gMute[c] ? kGrey : kWhite);
+  track.fillCircle(kTrackW / 2 - 1, cy, kTrackW / 2, gMute[c] ? kGrey : kWhite);
   track.pushSprite(colX(c) + 6, 0);
 }
 
@@ -240,7 +253,16 @@ void drawMixer() {
   for (int c = 0; c < 4; c++) {
     drawTrack(c);
     circleButton(mixBtn(c, 0), "M", gMute[c] ? kRed : kBtn);
-    if (c < 3) circleButton(mixBtn(c, 1), "S", gSolo[c] ? kYellow : kBtn, gSolo[c] ? kBg : kWhite);
+    if (c < 3) {
+      circleButton(mixBtn(c, 1), "S", gSolo[c] ? kYellow : kBtn, gSolo[c] ? kBg : kWhite);
+    } else {
+      // Main out has no Solo (soloing the final mix is meaningless), that
+      // spot is instead a toggle for which input the stutter grid acts on,
+      // mirroring Config's Stutter Track setting. Hollow so it reads
+      // differently from the solid mute/limiter/rec buttons around it.
+      char t[2] = {kStutTrack[cfgStutTrack][0], 0};
+      circleButtonHollow(mixBtn(c, 1), t, kOrange, kOrange);
+    }
     char lim[8];
     snprintf(lim, sizeof(lim), "%d", -limiterIdx[c]);
     circleButton(mixBtn(c, 2), lim, limiterIdx[c] ? kBlue : kBtn);
@@ -253,7 +275,6 @@ void drawMixer() {
       circleButton(mixBtn(c, 3), "PMP", compOn ? kOrange : kBtn, kWhite, 1);
     }
     text(names[c], colX(c) + 58, 229, 2, anySolo && c < 3 && !gSolo[c] ? kGrey : kWhite, kBg);
-    if (c < 3) d.drawFastVLine(colX(c) + 83, 0, kStripY, kDark);
   }
 }
 
@@ -521,6 +542,7 @@ void pressMixer(int x, int y) {
   for (int c = 0; c < 4; c++) {
     if (mixBtn(c, 0).hit(x, y)) gMute[c] = !gMute[c], dirty = true;
     if (c < 3 && mixBtn(c, 1).hit(x, y)) gSolo[c] = !gSolo[c], dirty = true;
+    if (c == 3 && mixBtn(c, 1).hit(x, y)) cfgStutTrack = (cfgStutTrack + 1) % 4, dirty = true;
     if (mixBtn(c, 2).hit(x, y)) limiterIdx[c] = (limiterIdx[c] + 1) % 7, dirty = true;
     if (mixBtn(c, 3).hit(x, y)) {
       if (c < 2)
