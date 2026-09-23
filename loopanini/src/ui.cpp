@@ -260,8 +260,11 @@ void drawMixer() {
       // spot is instead a toggle for which input the stutter grid acts on,
       // mirroring Config's Stutter Track setting. Hollow so it reads
       // differently from the solid mute/limiter/rec buttons around it.
-      char t[2] = {kStutTrack[cfgStutTrack][0], 0};
-      circleButtonHollow(mixBtn(c, 1), t, kOrange, kOrange);
+      // Shows the same 3 letter label as the column it targets (kStutTrack
+      // order is Looper, Synth, Main, Aux; those are the LOP, INT, ALL, EXT
+      // columns respectively), not an unrelated abbreviation.
+      static const int kStutCol[4] = {2, 0, 3, 1};
+      circleButtonHollow(mixBtn(c, 1), names[kStutCol[cfgStutTrack]], kOrange, kOrange, 1);
     }
     char lim[8];
     snprintf(lim, sizeof(lim), "%d", -limiterIdx[c]);

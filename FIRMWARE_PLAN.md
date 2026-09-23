@@ -634,7 +634,8 @@ rather than tiny numeric steppers.
 ### Status 2026-09-23 (second pass): mixer polish
 
 Main out's Solo spot (soloing the final mix has no meaning) is now a hollow
-toggle button showing one letter, L, S, M or A, that cycles and mirrors
+toggle button showing the 3 letter label of the column it targets (LOP,
+INT, ALL or EXT), that cycles and mirrors
 Config's Stutter Track setting, so which input the stutter grid acts on can
 be flipped from the Mixer screen without a trip to Config. Round mixer button
 text nudged 1px down and right (Mute, Solo, Limiter, the Pump button, this new
