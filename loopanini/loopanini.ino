@@ -34,6 +34,8 @@
 //      no RESET button hold needed
 //   r  plain reset
 
+#include <cstring>
+
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -169,7 +171,17 @@ void audioTask(void *) {
     midi_io::poll();
     midi_din::poll();
     int16_t *block = synth_engine::renderBlock();
-    ui::processBlock(block, AMY_BLOCK_SIZE);
+    // Aux in (ModuleAudio's mic/line jack): read even if nothing has it
+    // record-enabled or unmuted, so the meter and any live stutter on it
+    // stay correct the instant either is turned on. A failed read (module
+    // busy or not ready) just leaves this block's input silent, it doesn't
+    // block or spin: audio_io::readBlock has the same immediate-return
+    // failure behavior as writeBlock, see the comment below.
+    static int16_t aux_block[AMY_BLOCK_SIZE * 2];
+    if (!audio_io::readBlock(aux_block, AMY_BLOCK_SIZE)) {
+      memset(aux_block, 0, sizeof(aux_block));
+    }
+    ui::processBlock(block, aux_block, AMY_BLOCK_SIZE);
     if (!audio_io::writeBlock(block, AMY_BLOCK_SIZE)) {
       write_failures = write_failures + 1;
       // A failed write returns immediately instead of blocking on the I2S

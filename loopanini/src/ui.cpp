@@ -60,7 +60,7 @@ const char *const kRecStart[] = {"Level", "Now"};
 const char *const kSig[] = {"4/4", "3/4"};
 const char *const kOffOn[] = {"Off", "On"};
 const char *const kAudioOut[] = {"USB", "Aux", "Both"};
-const char *const kStutTrack[] = {"Looper", "Synth", "Main"};
+const char *const kStutTrack[] = {"Looper", "Synth", "Main", "Aux"};
 
 int cfgRecStart = 0, cfgSig = 0, cfgAutoOd = 0, cfgTm = 0, cfgTmGap = 0, cfgAudioOut = 2;
 int cfgSdRec = 0, cfgBpmMidi = 0, cfgLimRelease = 200, cfgStutTrack = 2;
@@ -75,7 +75,7 @@ const Param kConfig[] = {
     {"SD Record", &cfgSdRec, 0, 1, kOffOn},
     {"BPM From MIDI", &cfgBpmMidi, 0, 1, kOffOn},
     {"Lim Rel Ms", &cfgLimRelease, 0, 500, nullptr},
-    {"Stutter Track", &cfgStutTrack, 0, 2, kStutTrack},
+    {"Stutter Track", &cfgStutTrack, 0, 3, kStutTrack},
 };
 constexpr int kConfigN = sizeof(kConfig) / sizeof(kConfig[0]);
 
@@ -716,43 +716,60 @@ void update() {
   }
 }
 
-void processBlock(int16_t *b, int frames) {
+void processBlock(int16_t *b, const int16_t *aux, int frames) {
   const bool anySolo = gSolo[0] || gSolo[1] || gSolo[2];
   auto silent = [&](int c) { return gMute[c] || (anySolo && !gSolo[c]); };
   const float g0 = silent(0) ? 0.0f : gLevel[0] * gLevel[0];
+  const float g1 = silent(1) ? 0.0f : gLevel[1] * gLevel[1];
   const float g2 = silent(2) ? 0.0f : gLevel[2] * gLevel[2];
   const float g3 = gMute[3] ? 0.0f : gLevel[3] * gLevel[3];
 
-  int p0 = 0;
-  for (int i = 0; i < frames * 2; i++) {
-    const float s = b[i] * g0;
-    const int a = (int)fabsf(s);
-    if (a > p0) p0 = a;
-    b[i] = (int16_t)s;
-  }
+  static int16_t extSig[2 * 1024];
+  static int16_t loopIn[2 * 1024];
   static int16_t loopOut[2 * 1024];
   if (frames > 1024) frames = 1024;
-  const float p2 = looper::process(b, frames, gRecEnable[0], g2, loopOut);
+
+  int p0 = 0, p1 = 0;
+  for (int i = 0; i < frames * 2; i++) {
+    const float s0 = b[i] * g0;
+    const float s1 = aux[i] * g1;
+    const int a0 = (int)fabsf(s0);
+    const int a1 = (int)fabsf(s1);
+    if (a0 > p0) p0 = a0;
+    if (a1 > p1) p1 = a1;
+    b[i] = (int16_t)s0;       // INT, post fader/mute/solo
+    extSig[i] = (int16_t)s1;  // EXT, post fader/mute/solo
+    // Looper input: whichever of INT/EXT are record-enabled, summed. Taken
+    // before stutter is applied to either, so a stutter repeat is never
+    // recorded into the loop, same as arpnmidi's Stutter.
+    int32_t mix = 0;
+    if (gRecEnable[0]) mix += b[i];
+    if (gRecEnable[1]) mix += extSig[i];
+    loopIn[i] = (int16_t)(mix > 32767 ? 32767 : (mix < -32768 ? -32768 : mix));
+  }
+  const bool recording = gRecEnable[0] || gRecEnable[1];
+  const float p2 = looper::process(loopIn, frames, recording, g2, loopOut);
 
   stutter::apply(b, frames, stutter::T_SYNTH);
+  stutter::apply(extSig, frames, stutter::T_AUX);
   stutter::apply(loopOut, frames, stutter::T_LOOPER);
-  for (int i = 0; i < frames * 2; i++) {
-    int32_t m = (int32_t)b[i] + loopOut[i];
-    b[i] = (int16_t)(m > 32767 ? 32767 : (m < -32768 ? -32768 : m));
-  }
 
   int p3 = 0;
   for (int i = 0; i < frames * 2; i++) {
-    float s = b[i] * g3;
-    const int a = (int)fabsf(s);
+    int32_t m = (int32_t)b[i] + extSig[i] + loopOut[i];
+    m = m > 32767 ? 32767 : (m < -32768 ? -32768 : m);
+    float s3 = m * g3;
+    if (s3 > 32767.0f) s3 = 32767.0f;
+    if (s3 < -32768.0f) s3 = -32768.0f;
+    const int a = (int)fabsf(s3);
     if (a > p3) p3 = a;
-    if (s > 32767.0f) s = 32767.0f;
-    if (s < -32768.0f) s = -32768.0f;
-    b[i] = (int16_t)s;
+    b[i] = (int16_t)s3;
   }
   stutter::apply(b, frames, stutter::T_MAIN);
-  const float f0 = p0 / 32768.0f, f3 = p3 / 32768.0f;
+
+  const float f0 = p0 / 32768.0f, f1 = p1 / 32768.0f, f3 = p3 / 32768.0f;
   if (f0 > gPeak[0]) gPeak[0] = f0;
+  if (f1 > gPeak[1]) gPeak[1] = f1;
   if (p2 > gPeak[2]) gPeak[2] = p2;
   if (f3 > gPeak[3]) gPeak[3] = f3;
 }
