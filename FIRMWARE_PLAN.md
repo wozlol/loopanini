@@ -631,6 +631,21 @@ through the analog output at the same time may well want those two at
 different levels. Touch drag vertical faders, using the actual screen space
 rather than tiny numeric steppers.
 
+### Status 2026-09-23: aux in is live
+
+`audio_io::readBlock()` is now called every audio block, so EXT (ModuleAudio's
+mic/line jack) is a real signal for the first time, not just a mixer
+placeholder. EXT has its own fader, mute, solo and meter, same as INT. INT and
+EXT are summed into the loop record tap independently, gated by each column's
+own loop-record button, so either or both can feed the looper. Stutter gained
+a fourth target, Aux (Config's Stutter Track list is now Looper, Synth, Main,
+Aux), so a live stutter works on the incoming aux signal the same way it
+already did on the synth, the loop, and the main mix. **Not yet confirmed on
+hardware** whether calling readBlock and writeBlock both every block keeps
+pace, ModuleAudio's ES8388 is a duplex codec so this should just work, but
+only a real run proves it: watch the STAGE lines and the `audio:` heartbeat
+for write failures or a rate that isn't the healthy ~188 blocks per 2 s line.
+
 ## Recording to SD
 
 A later, bolt-on addition, not something to build early or design around
