@@ -35,6 +35,21 @@
 #define LOOPANINI_AUX_ADC_INPUT 2
 #endif
 
+// ModuleAudio's analog mic preamp gain on the aux in path, one of 0, 3, 6, 9,
+// 12, 15, 18, 21, 24 (dB). Lower this to test whether the EXT hiss/AMY-bleed
+// reported on real hardware scales with it: this gain stage amplifies
+// whatever is actually present at the ADC's input pins, including any board
+// level analog crosstalk from the DAC output, before ADC captures it, so if
+// the hiss drops with the gain, that confirms crosstalk rather than a code
+// bug (the digital mix path was checked and has no route from AMY's buffer
+// into the aux buffer, see FIRMWARE_PLAN.md's Mixer status notes). Default
+// dropped from the codec driver's own 12dB example to 0dB: a typical line
+// level aux source (a synth, a mixer bus) doesn't need mic preamp gain at
+// all, only a genuine low level mic would.
+#ifndef LOOPANINI_AUX_MIC_GAIN_DB
+#define LOOPANINI_AUX_MIC_GAIN_DB 0
+#endif
+
 // Which port the Unit MIDI is plugged into. Pick LOOPANINI_PORT_B (black, the
 // default) or LOOPANINI_PORT_C (blue). Do NOT pick LOOPANINI_PORT_A (red) while
 // USB host is on, GPIO1 on that connector is the host's chip select. If you do,

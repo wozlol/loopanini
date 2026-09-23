@@ -667,6 +667,56 @@ to the speaker (would explain the oscillation and the bleed directly), and
 does the problem persist with the speaker output muted or through headphones
 instead (isolates acoustic feedback from an electrical/firmware cause).
 
+**Update 2026-09-23: ruled out acoustic feedback and checked the actual code
+paths, not guessing this time.** The user confirmed the aux source is a
+powered speaker setup and its mic element does not pick up voice, so this is
+not a mic-hears-speaker acoustic loop. Traced the real signal path instead of
+speculating further:
+- `ui::processBlock()`'s `aux` parameter is `const int16_t *`, read only.
+  `extSig[]` (the EXT channel) is written purely from `aux[i] * g1`, nowhere
+  does AMY's `b[]` (the INT buffer) write into `extSig[]`. There is no digital
+  code path from AMY into the aux channel.
+- `stutter::apply(b, frames, T_SYNTH)` returns immediately without touching
+  `b[]` whenever T_SYNTH isn't the selected stutter target (the default
+  target is Main), so it isn't quietly attenuating or otherwise touching the
+  INT signal either.
+- The ES8388 driver (`Module-Audio/src/es8388.cpp`) explicitly disables
+  analog line bypass for both channels at `init()`
+  (`DACCONTROL17`/`DACCONTROL20 = 0x90`, bit 6 clear, the driver's own
+  comment says so), and `audio_io.cpp` never calls `setLineBypass()` or
+  `setMixSourceSelect()` to turn it back on. So the codec's own documented
+  analog monitor/bypass path is off, confirmed by reading both the driver and
+  our own call sites, not assumed.
+- DAC output volume is maxed by `setSpeakerVolume(100)` (works out to the
+  driver's top digital DAC volume register value), so INT sounding quiet
+  relative to EXT is not an unintended digital attenuation on the INT path.
+
+With the obvious code-level explanations checked and ruled out, what's left
+is analog behavior below the code: crosstalk between the DAC output and ADC
+input on ModuleAudio, picked up at the ADC's input pins before digitization
+and then amplified by the mic preamp gain we apply to the whole aux path
+(`MIC_GAIN_12DB`, a substantial analog gain stage, applied to whatever is
+actually present at the selected input pins, crosstalk included). This fits
+every symptom: EXT hearing AMY as hissy and comparatively loud (crosstalk
+boosted by the preamp), a real plugged in aux signal arriving "grumbly,
+stacking, choppy" at the right pitch (the real signal plus the same crosstalk
+layered on top), and the bassy oscillation when EXT and Main are both high
+(two correlated copies of the same signal summing and reinforcing each
+other, not necessarily acoustic feedback, an analog crosstalk loop between
+DAC and ADC can motorboat the same way).
+
+Added a second switch to test this directly: `LOOPANINI_AUX_MIC_GAIN_DB` in
+`config.h` (0/3/6/9/12/15/18/21/24, default dropped to **0dB** from the
+driver's own 12dB example, since a typical line level aux source doesn't
+need mic preamp gain at all). If the hiss and bleed scale down with this
+gain, that confirms analog crosstalk amplified by the preamp rather than
+anything upstream in code. Combined with `LOOPANINI_AUX_ADC_INPUT` from the
+first pass, both are one line changes to test without hunting for where they
+live. Not yet confirmed on hardware which combination, if any, actually
+clears it; reseating ModuleAudio on the stack is also worth trying if
+neither switch helps, since a marginal module-to-module connection can cause
+exactly this kind of crosstalk too.
+
 
 ### Status 2026-09-23 (second pass): mixer polish
 

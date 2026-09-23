@@ -65,7 +65,14 @@ bool begin() {
 #else
   device.setMicInputLine(ADC_INPUT_LINPUT2_RINPUT2);
 #endif
-  device.setMicGain(MIC_GAIN_12DB);
+  // es_mic_gain_t's values are 0=0dB, 1=3dB, ... 8=24dB, i.e. the enum index
+  // is the gain in dB divided by 3, see es8388.hpp. LOOPANINI_AUX_MIC_GAIN_DB
+  // is asserted to one of that fixed set below so an out of range value
+  // fails to compile instead of silently picking the nearest one.
+  static_assert(LOOPANINI_AUX_MIC_GAIN_DB % 3 == 0 && LOOPANINI_AUX_MIC_GAIN_DB >= 0 &&
+                    LOOPANINI_AUX_MIC_GAIN_DB <= 24,
+                "LOOPANINI_AUX_MIC_GAIN_DB must be 0, 3, 6, ... 24");
+  device.setMicGain((es_mic_gain_t)(LOOPANINI_AUX_MIC_GAIN_DB / 3));
   device.setMicAdcVolume(80);
   // es8388->init() (inside begin(), above) sets the analog Lout/Rout volume
   // registers to a conservative "-45dB" power-up default and never raises
