@@ -60,7 +60,11 @@ bool begin() {
   // codec's line input, speaker/headphone output live. The Ext/Int input
   // toggle and the CoreS3-speaker output toggle from FIRMWARE_PLAN.md come
   // later, once there's a settings screen to put them on.
+#if LOOPANINI_AUX_ADC_INPUT == 1
+  device.setMicInputLine(ADC_INPUT_LINPUT1_RINPUT1);
+#else
   device.setMicInputLine(ADC_INPUT_LINPUT2_RINPUT2);
+#endif
   device.setMicGain(MIC_GAIN_12DB);
   device.setMicAdcVolume(80);
   // es8388->init() (inside begin(), above) sets the analog Lout/Rout volume

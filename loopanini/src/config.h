@@ -23,6 +23,18 @@
 #define LOOPANINI_ENABLE_DIN_MIDI 1
 #endif
 
+// Which of ModuleAudio's two 3.5mm jacks the Mixer's EXT (aux in) channel
+// reads from. 1 = LINPUT1/RINPUT1, the TRS-only jack. 2 = LINPUT2/RINPUT2,
+// the TRRS combo jack (also accepts a plain TRS plug). M5Stack's own docs
+// disagree with each other on which jack is "the mic" versus "the aux/line"
+// jack, unconfirmed on this hardware, see FIRMWARE_PLAN.md's Mixer status
+// notes. If EXT sounds hissy, full of the synth, or noisy no matter what's
+// plugged in or how low its fader is, try flipping this, the other input may
+// be floating (nothing wired to it) and picking up crosstalk.
+#ifndef LOOPANINI_AUX_ADC_INPUT
+#define LOOPANINI_AUX_ADC_INPUT 2
+#endif
+
 // Which port the Unit MIDI is plugged into. Pick LOOPANINI_PORT_B (black, the
 // default) or LOOPANINI_PORT_C (blue). Do NOT pick LOOPANINI_PORT_A (red) while
 // USB host is on, GPIO1 on that connector is the host's chip select. If you do,

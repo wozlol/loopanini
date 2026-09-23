@@ -40,7 +40,10 @@ struct Rect {
 // Written by the UI task, read by the audio task. Aligned 32 bit accesses are
 // atomic on the ESP32, so plain volatiles are enough here. Channels are
 // 0 INT (synth), 1 EXT (aux in, not wired yet), 2 LOP (looper return), 3 ALL.
-volatile float gLevel[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+// INT, EXT, LOP, ALL. EXT defaults to 75%, not full: it's a live mic/line
+// input, and a hot analog input on this board can bleed into what should be
+// a quiet aux channel, see FIRMWARE_PLAN.md's Mixer status notes.
+volatile float gLevel[4] = {1.0f, 0.75f, 1.0f, 1.0f};
 volatile bool gMute[4] = {false, false, false, false};
 volatile bool gSolo[3] = {false, false, false};
 volatile bool gRecEnable[2] = {true, false};  // INT and EXT feed the looper
@@ -131,7 +134,11 @@ M5Canvas track(&M5.Display);
 
 // Mixer geometry: a full height track on the left of each 80 px column, four
 // round buttons stacked to its right, the channel title under the buttons.
-constexpr int kTrackW = 24, kTrackH = 240;
+// kTrackW is 1px wider than the visual slider so the handle circle (radius
+// kTrackW/2, centered at kTrackW/2) has room on its right edge without
+// clipping in the sprite; the extra column is on the right, the slider's
+// left edge and screen position don't move.
+constexpr int kTrackW = 25, kTrackH = 240;
 int colX(int c) { return c * 80; }
 Rect trackHit(int c) { return {colX(c) + 2, 0, 32, kTrackH}; }
 int btnCy(int i) { return 26 + i * 54; }
@@ -241,7 +248,7 @@ void drawTrack(int c) {
   }
   if (hv > 1) track.fillRect(kTrackW / 2 - 4, kTrackH - hv, 8, 2, kWhite);
   const int cy = kTrackW / 2 + (int)((1.0f - gLevel[c]) * (kTrackH - kTrackW));
-  track.fillCircle(kTrackW / 2 - 1, cy, kTrackW / 2, gMute[c] ? kGrey : kWhite);
+  track.fillCircle(kTrackW / 2, cy, kTrackW / 2, gMute[c] ? kGrey : kWhite);
   track.pushSprite(colX(c) + 6, 0);
 }
 

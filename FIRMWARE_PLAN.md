@@ -631,6 +631,43 @@ through the analog output at the same time may well want those two at
 different levels. Touch drag vertical faders, using the actual screen space
 rather than tiny numeric steppers.
 
+### Status 2026-09-23 (third pass): boot splash, EXT default, aux hiss/bleed report
+
+A "LOOPANINI / starting..." splash draws the instant `M5.begin()` makes the
+display usable, in `loopanini.ino`, well before ModuleAudio, AMY, SD kit
+loading and USB host bring up finish, so the several second boot doesn't look
+like a hang. `ui::begin()`'s first real draw replaces it once setup finishes.
+EXT now defaults to 75%, not full, since it's a live analog input and this
+hardware can put a hot signal on it (see below). Slider fader handle geometry
+fixed: it had been centered 1px into its sprite, clipping its left edge, the
+sprite is now 1px wider on the right instead of shifting the handle, so it no
+longer clips on either side.
+
+**Hardware audio report from the first live aux test, not resolved yet:** a
+bassy oscillation ("flappy") when EXT and Main are both near full, AMY's synth
+audibly bleeding into the EXT channel as a hiss at full apparent volume (while
+turning INT itself all the way up stays quiet and clean by comparison), and
+plugged-in aux audio sounding grumbly, stacked and choppy despite being the
+right pitch. All three read like some mix of acoustic/electrical feedback
+(the aux mic/line hearing the speaker) and analog crosstalk on ModuleAudio's
+input, not a rendering or timing bug, since the reported pitch is correct.
+Two problems investigating this: M5Stack's own docs disagree with each other
+on which of ModuleAudio's two 3.5mm jacks (`ADC_INPUT_LINPUT1_RINPUT1` vs
+`ADC_INPUT_LINPUT2_RINPUT2`) is "mic" versus "aux/line", one docs page calls
+LINPUT1 the TRS-only jack and LINPUT2 the TRRS combo jack that also accepts a
+plain TRS plug, a second source claimed the opposite, and neither is
+confirmed against this actual board. `LOOPANINI_AUX_ADC_INPUT` in `config.h`
+(1 or 2) now picks which input EXT reads from, so this is a one line change
+and reflash to test, no code hunting, if the currently selected jack turns
+out to be the wrong or a floating one (a floating high impedance ADC input is
+exactly the kind of thing that would pick up crosstalk as a hiss). Open
+questions for the next hardware session: which physical jack is the aux
+source actually plugged into, is that jack physically or acoustically close
+to the speaker (would explain the oscillation and the bleed directly), and
+does the problem persist with the speaker output muted or through headphones
+instead (isolates acoustic feedback from an electrical/firmware cause).
+
+
 ### Status 2026-09-23 (second pass): mixer polish
 
 Main out's Solo spot (soloing the final mix has no meaning) is now a hollow

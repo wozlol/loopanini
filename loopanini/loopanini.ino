@@ -216,6 +216,19 @@ void setup() {
   auto cfg = M5.config();
   M5.begin(cfg);
 
+  // A blank screen for the several seconds setup() takes (USB enumeration,
+  // ModuleAudio, AMY, SD kit load, USB host) looks like a hang, so put
+  // something up the moment the display is ready, well before any of that.
+  // ui::begin() (much later, once everything is up) replaces this with the
+  // real UI on its first draw.
+  M5.Display.fillScreen(TFT_BLACK);
+  M5.Display.setTextDatum(textdatum_t::middle_center);
+  M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+  M5.Display.setTextSize(3);
+  M5.Display.drawString("LOOPANINI", M5.Display.width() / 2, M5.Display.height() / 2 - 12);
+  M5.Display.setTextSize(1);
+  M5.Display.drawString("starting...", M5.Display.width() / 2, M5.Display.height() / 2 + 20);
+
   // Named explicitly so the host OS and DAWs show "Loopanini," not a
   // generic default, for the device as a whole. USBMIDI's own name (set in
   // src/midi_io.cpp) covers the MIDI port specifically, some hosts show
