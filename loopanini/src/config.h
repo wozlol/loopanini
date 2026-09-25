@@ -24,15 +24,18 @@
 #endif
 
 // Which of ModuleAudio's two 3.5mm jacks the Mixer's EXT (aux in) channel
-// reads from. 1 = LINPUT1/RINPUT1, the TRS-only jack. 2 = LINPUT2/RINPUT2,
-// the TRRS combo jack (also accepts a plain TRS plug). M5Stack's own docs
-// disagree with each other on which jack is "the mic" versus "the aux/line"
-// jack, unconfirmed on this hardware, see FIRMWARE_PLAN.md's Mixer status
-// notes. If EXT sounds hissy, full of the synth, or noisy no matter what's
-// plugged in or how low its fader is, try flipping this, the other input may
-// be floating (nothing wired to it) and picking up crosstalk.
+// reads from. 1 = LINPUT1/RINPUT1, the TRS jack (M5Stack's spec: "mic-only").
+// 2 = LINPUT2/RINPUT2, the TRRS combo jack (mic input, CTIA/OMTP switching,
+// plus stereo headphone output on the same jack). Both are mono mic inputs
+// by hardware design, M5Stack's own product spec lists this module's input
+// as "2-channel mic input" (two independent mono paths, not a stereo pair),
+// and the driver docs confirm both jacks share the ES8388's single LIN1 pin,
+// kept mutually exclusive by the module's own STM32 controller. Confirmed on
+// hardware: 1 is the correct choice here, 2 shares contacts with the
+// speaker/headphone output and let AMY's own output bleed back in through a
+// plain TRS plug. See FIRMWARE_PLAN.md's Mixer status notes.
 #ifndef LOOPANINI_AUX_ADC_INPUT
-#define LOOPANINI_AUX_ADC_INPUT 2
+#define LOOPANINI_AUX_ADC_INPUT 1
 #endif
 
 // ModuleAudio's analog mic preamp gain on the aux in path, one of 0, 3, 6, 9,

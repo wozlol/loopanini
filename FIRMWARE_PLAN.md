@@ -7,6 +7,20 @@ cache, LEDs, and touch UI all sharing one chip, so the responsibilities and the
 looper's state machine need to be nailed down before anything gets typed into
 the Arduino IDE.
 
+## MVP milestone (2026-09-25)
+
+Marked here at the user's request as the goalpost for a minimum viable
+build: looper (record/overdub/play/undo/clear, time machine mode), AMY
+synth and sampler across 4 channels (patches, live SD sample drums, per
+channel volume/voices), a 4 level mixer (INT/EXT/LOP/ALL) with a working
+SP1LimiterJS style limiter (automatic makeup gain) per channel, beat
+stutter on any of the four, USB device/host/DIN MIDI, and a touch UI
+across five screens, all confirmed working on real hardware as of the
+Mixer section's eighteenth pass status note. Settings persist across
+reboots. Not yet in the MVP: per channel effects beyond the limiter, the
+Custom/SD Card patch categories, and the tremolo/vibrato/univibe combo
+effect, see that same status note's backlog for the full detail on each.
+
 ## Hardware
 
 - M5Stack CoreS3: ESP32-S3, dual core Xtensa LX7 at 240 MHz, 8 MB PSRAM, 16 MB
@@ -504,26 +518,26 @@ Each column has:
   the slider: **top = Mute**, **middle = Limiter ceiling**, **bottom = loop
   record enable** (a loop arrow symbol, on means this channel is recorded into
   the looper).
-- Middle button cycles the limiter ceiling 0, -1, -2, -3, -4, -5, -6 dB and
-  back to 0. The limiter is always on, at 0 dB it is a brick wall so nothing
-  clips. Copy the LOSER "Simple Peak-1 Limiter" (Samelot/Reaper, Effects/LOSER,
-  SP1LimiterJS). The fetched JSFX source (threshold in dB, `thresh =
-  exp(dB / 8.65617)`, a smoothed peak envelope with roughly a 10 Hz low pass,
-  `gain = max(envelope, thresh)`, output divided by gain) may be missing lines
-  such as final makeup, so re-read the original file and reproduce it exactly
-  when implemented.
-  **Better candidate found, same LOSER folder: `MGA_JSLimiter`** (Michael
-  Gruhn, GPL v3). Read from source: no delay line, it is not truly look ahead.
-  It takes the peak of both channels, keeps two overlapping peak hold windows
-  of `srate/128` samples (about 8 ms at 48 kHz), and takes the larger as the
-  target envelope. Attack is instant (envelope jumps to a higher peak the same
-  sample), release is a one pole decay `r = exp(-3 / (srate * max(release,
-  0.05)))`, release default 200 ms. Gain is `thresh / env` times
-  `ceiling / thresh` whenever the envelope is above threshold. So the output
-  never exceeds the ceiling, which is what the always on brick wall needs, and
-  the Mixer ceiling button (0 to -6 dB) maps directly to its Ceiling slider.
-  Plan: use MGA_JSLimiter for the ceiling limiter, keep SP1 as a reference.
-  It is GPL v3, keep the notice if the code is ported closely.
+- Middle button cycles the limiter Threshold 0, -1, -2, -3, -4, -5, -6 dB and
+  back to 0. The limiter is always on.
+  **Built, using SP1LimiterJS "Simple Peak-1 Limiter" (Michael Gruhn 2006,
+  LOSER pack, Samelot/Reaper's Effects/LOSER folder), fetched and ported
+  line for line, see the Mixer section's 2026-09-24 tenth pass status
+  note for why this replaced the MGA_JSLimiter this project tried first.**
+  Real source: `thresh = exp(slider1/8.65617025)`, a peak envelope smoothed
+  by a one pole ~10Hz lowpass (`b = -exp(-2*pi*10/srate)`) combined with the
+  instant per-sample peak via `max()` for instant-attack/smooth-release,
+  `gain = (rms > thresh) ? rms : thresh`, `output = input / gain`. Below
+  threshold that divides by a fixed ratio under 1.0, i.e. automatic makeup
+  gain toward 0dBFS, which is the behavior this project actually wanted:
+  turning the Threshold down should make things louder up to the ceiling,
+  not just quieter above it. MGA never had that, it only ever reduces gain.
+  Above threshold, dividing by the envelope self bounds the output to
+  exactly unity by construction (whichever channel is loudest lands at the
+  ceiling), no separate final clamp needed mathematically, kept anyway as
+  float/int16 boundary insurance. It is a third party contribution with an
+  acknowledgement requirement, not GPL, keep the author credit if ported
+  closely, see the header comment in the fetched source.
 - **Column 4 (Main out) bottom button is not a loop toggle.** Main must never
   feed back into the looper input. That button turns on the **pumping
   compressor**: fast attack, slow release, release length equal to one beat at
@@ -570,8 +584,9 @@ activate it, release to stop. Target (looper, AMY synth or main) is a setting.
 ### 5. Config
 Uses the parameter list menu. Settings so far:
 - Time signature: 4/4 or 3/4.
-- Limiter release (ms), one global value used by every limiter instance in the
-  mixer (MGA_JSLimiter release, default 200).
+- ~~Limiter release (ms)~~ removed: SP1LimiterJS (the limiter actually built,
+  see the Mixer section) hardcodes a fixed ~10Hz envelope lowpass, no
+  separate release control the way MGA_JSLimiter (tried first) had one.
 - Looper auto overdub: on or off.
 - Looper time machine mode: on or off.
 - Time machine gap: 0 to 4 beats.
@@ -710,15 +725,593 @@ Added a second switch to test this directly: `LOOPANINI_AUX_MIC_GAIN_DB` in
 driver's own 12dB example, since a typical line level aux source doesn't
 need mic preamp gain at all). If the hiss and bleed scale down with this
 gain, that confirms analog crosstalk amplified by the preamp rather than
-anything upstream in code. Combined with `LOOPANINI_AUX_ADC_INPUT` from the
-first pass, both are one line changes to test without hunting for where they
-live. Not yet confirmed on hardware which combination, if any, actually
-clears it; reseating ModuleAudio on the stack is also worth trying if
-neither switch helps, since a marginal module-to-module connection can cause
-exactly this kind of crosstalk too.
+anything upstream in code.
 
+**Update 2026-09-23 (fourth pass): mic gain test result, and a full digital
+trace turned up nothing, new leading theory is a connector short, not
+crosstalk.** Hardware test result: dropping `LOOPANINI_AUX_MIC_GAIN_DB` from
+12 to 0 changed nothing, AMY still bleeds into EXT at full apparent volume.
+That falsifies the preamp-amplified-crosstalk theory above, a real crosstalk
+signal riding into the ADC ahead of the preamp would have dropped by 12dB
+with the gain. Went back through every remaining code layer between AMY's
+output and the aux capture buffer, all the way down to the driver internals
+this time, not stopping at our own source:
+- `ES8388::init()`'s output mixer register (`DACCONTROL16`) is left `0x00`,
+  meaning nothing from the ADC/line-in side is mixed into the DAC output
+  either, confirmed by reading `setMixSourceSelect()`'s register map
+  (`MIXLIN1`/`MIXLIN2`/`MIXADC`/`MIXRES` options), which we never call.
+- `setADCInput()` / `es_adc_input_t` is a plain two-way physical jack mux
+  (`0x00` or `0x10` into `ADCCONTROL2`), there is no DAC-loopback or monitor
+  option in that register at all, so the codec itself has no register-level
+  path for its own DAC output to reappear on the ADC capture.
+- The ESP32 core's I2S driver (`ESP_I2S.cpp`) allocates genuinely separate
+  `tx_chan`/`rx_chan` handles (`i2s_new_channel`), and `readBytes()`/`write()`
+  use separate transform buffers, no shared scratch buffer between them.
+- Our own `aux_block` in `loopanini.ino` is `static`, correctly
+  `memset` to zero on a failed `readBlock()`, not a stack array that could
+  hold stale/aliased contents from another function.
+No code path survived this pass. Between the digital mixing code, the codec
+register map in both directions, and the I2S driver internals, there is
+nowhere left in software for AMY's signal to reach the aux capture buffer.
 
-### Status 2026-09-23 (second pass): mixer polish
+**New leading theory: a TRS plug in ModuleAudio's TRRS jack.** Per the first
+pass above, `LOOPANINI_AUX_ADC_INPUT`'s default (input 2) is documented as
+the TRRS combo jack, which a 3-conductor TRS cable can physically bridge two
+contacts on (a 3-pole plug's sleeve contact spans what a 4-pole jack exposes
+as two separate contacts). If ModuleAudio's line/speaker output and its mic
+input share that jack's contacts the way phone-headset TRRS jacks
+conventionally do, a plain TRS aux cable would electrically short output
+onto input at the connector itself, upstream of and parallel to the preamp,
+which is exactly why the gain test had zero effect. This also fits the bassy
+"flappy" oscillation with EXT and Main both high (a real analog feedback
+loop through that short) and the grumbly/choppy real aux audio (a clean
+signal plus a partial short degrading it). Not yet confirmed on hardware,
+next test is switching `LOOPANINI_AUX_ADC_INPUT` to 1 (the TRS-only jack,
+no shared contacts to short) and/or trying a genuine 4-pole TRRS cable in
+jack 2 instead of a 3-pole TRS one.
+
+**Update 2026-09-24 (fifth pass): bleed confirmed fixed by switching jacks,
+both ModuleAudio jacks are documented mic inputs, not stereo line inputs,
+and AMY's quiet output traced clean.** On real hardware, switching
+`LOOPANINI_AUX_ADC_INPUT` to 1 fixed the AMY-into-EXT bleed completely,
+confirming the connector-short theory above rather than crosstalk.
+
+Remaining aux symptom, now isolated: constant pops/crackles on EXT (scale
+with the EXT fader, so they're in the captured samples, not downstream
+noise), and a stereo test source only audible on the left channel while the
+pops hit both. Module-Audio's own README states the hardware fact directly,
+no more guessing needed: "one TRS jack for microphone input only, one TRRS
+jack for both microphone input and headphone output", with CTIA/OMTP
+auto-switching for headset mic compatibility. Both of ModuleAudio's jacks
+are mic inputs by design, not general stereo line/aux inputs. A stereo
+line-level source's right channel landing on a jack conductor the hardware
+expects to carry mic bias, not audio, fits both symptoms: silence-or-noise
+on that channel (pops) and no real right-channel signal (left-only). This
+looks like a hardware input-type mismatch, not a firmware bug. Open
+question for the next hardware session: does jack 2 (also mic, but wired
+for a full CTIA/OMTP headset) show the same mono-plus-pops behavior with
+the same stereo source, which would confirm neither jack does genuine
+stereo line-in, versus a per-jack difference.
+
+AMY's own output level: traced the full gain chain end to end this pass,
+`ui::processBlock()`'s mixer math (`gLevel[0]^2` at fader default 1.0, no
+attenuation), AMY's own `synth_level` and bus `volume` (both documented
+default 1.0 in `docs/api.md`, and never actually pushed as events at boot
+since `ui.cpp`'s `amySeen[]` change detection starts equal to `amy[]`'s
+defaults, though that only matters where they'd otherwise differ), and
+ModuleAudio's DAC volume (`setSpeakerVolume(100)`, maxed). Nothing in our
+code or AMY's own defaults attenuates it. Most likely explanation left is
+the patch/velocity actually being played rather than a hidden gain bug,
+not yet confirmed on hardware, worth checking against a different patch or
+higher velocity before treating this as a firmware issue.
+
+**Update 2026-09-24 (sixth pass): looked up the real hardware spec instead
+of inferring from README wording, added Int/Ext Max Gain Db, and finally
+wired the limiter up to the MGA_JSLimiter design this section already
+spec'd out.** M5Stack's own product page for this module states it plainly,
+no more inferring from README phrasing: **"2-channel mic input, 1-channel
+stereo headphone output."** Two independent mono mic paths in, one stereo
+pair out, that's the whole input capability of this module, on either jack,
+confirmed rather than guessed. `audio_io::readBlock()` now folds left into
+right on every captured frame right after `device.record()` succeeds, so
+the mixer, looper and stutter all see clean mono-as-stereo instead of
+RIN1's floating-pin noise. That's a firmware-side accommodation of a real
+hardware ceiling, not a bug fix pretending this module does stereo line-in,
+it doesn't.
+
+AMY's quiet output: added `Int Max Gain Db` (default 12) and `Ext Max Gain
+Db` (default 0, no change from a plain unity aux passthrough) to Config.
+These add linear gain on top of the existing quadratic fader taper, so a
+full INT fader now reaches +12dB by default instead of stopping at unity,
+giving the meter somewhere to go. This only made sense once the limiter
+this section already researched (MGA_JSLimiter, the "Better candidate
+found" note above) was actually wired into the audio path, unity headroom
+with no limiter is just a louder way to clip, so that's built now too:
+`ui.cpp`'s `applyLimiter()`, one instance per mixer channel (`limSt[4]`),
+using this section's own spec exactly, two overlapping `srate/128` sample
+peak hold windows (implemented as a running window plus the previous
+window's frozen peak, equivalent without needing two phase counters),
+instant attack, one pole release `exp(-3 / (srate * max(release, 0.05)))`
+off the shared `Lim Rel Ms` setting, gain `ceiling / env` above the ceiling.
+Runs after each channel's stutter stage (INT, EXT, LOP, then Main last),
+so `limiterIdx[c]`'s Mixer button is no longer UI only, and is also what
+makes pushing `Int Max Gain Db` above 0 safe rather than just louder
+clipping. Not yet confirmed on hardware. The pumping compressor on Main is
+still UI only, `compOn` in `ui.cpp`, that's separate work.
+
+**Update 2026-09-24 (seventh pass): the sixth pass limiter had a real bug,
+fixed, and the looper stays stereo.** First hardware test after the sixth
+pass surfaced it directly: loud AMY chords clipped/glitched instead of
+being limited, on a random single speaker rather than both, changing a
+channel's limiter ceiling had no audible effect, and pressing Main's
+limiter button crashed the board. Root cause, found by re-reading the code
+that had just been written rather than guessing at hardware causes: the
+sixth pass called `applyLimiter()` as a separate pass *after* the existing
+per-sample loop that computes `s0 = b[i] * g0` (fader times
+`cfgIntMaxGainDb`'s linear gain) and hard clamps it straight to int16
+range. With max gain above 0dB that clamp is a real hard clip, happening
+*before* the limiter ever saw the sample, so the limiter had nothing left
+to react to, explaining all four symptoms at once (clip instead of limit,
+no effect from the ceiling setting, and an asymmetric clip/glitch on
+genuinely panned AMY content since the two channels can peak at different
+times). Main's own sum step had the identical pattern (sum of three
+channels hard clamped before `*g3`, before its limiter pass), which is the
+likely crash, though that exact code path no longer exists to confirm
+against.
+
+Fixed by restructuring `ui::processBlock()` so INT, EXT and Main run their
+limiter inline, on the float value right after the fader/gain multiply and
+*before* any int16 cast (`limiterStep()`, shared by a new inline call site
+and by `applyLimiter()`, kept only for LOP, which never exceeds unity and
+so never had this problem). Signal order is now fader/sum -> limiter ->
+stutter for all four channels, consistent, LOP's limiter call moved before
+its stutter call to match. Not yet confirmed on hardware.
+
+Also asked whether the looper should go mono, since EXT and AMY both
+looked mono from the chord glitch. Traced AMY's own docs before answering:
+every oscillator has a `pan` control (`Q`/`pan_coefs`, 0..1, default
+centered) and Juno patches specifically drive AMY's chorus effect for
+width, so AMY is not mono, the glitch was the bug above. Looper stays
+stereo.
+
+**Update 2026-09-24 (eighth pass): the pops likely aren't a loudness
+problem at all, added real CPU load measurement instead of guessing
+further.** New hardware clues after the seventh pass fix: glitching gets
+much worse beyond ~5 held notes, a single held note still pops (silence
+never does), aux still pops a lot, and the limiter is not audibly doing
+anything even pushed hard. That combination doesn't fit an amplitude/
+clipping problem, a limiter cannot fix a dropout, it only controls
+loudness, so if these are real-time buffer underruns (a block not ready in
+time), the limiter would correctly have zero effect on them, that is
+itself a real clue pointing at timing, not gain staging.
+
+Traced whether AMY has real load measurement rather than estimating: it
+does, `amy_get_render_load()` and a built in overload failsafe
+(`amy_overload_check()`, `config.overload_threshold` default 98% for
+250ms, `amy_start()` already wires the threshold in), but that check only
+ever runs from AMY's own `i2s.c` platform render loop, which this project
+does not use, ModuleAudio owns I2S here through `audio_io.cpp` instead. So
+the load tracker has been silently reading 0 the entire project, and the
+failsafe has never been armed. Fixed in `loopanini.ino`'s `audioTask()`:
+times `synth_engine::renderBlock()` and calls `amy_overload_check()` every
+block (arms the failsafe as a side effect, a controlled silence-and-reset
+under sustained 98%+ load beats an unpredictable pop or a hang), and times
+the full block (render + mixer/limiter/stutter + I2S read/write) too. Both
+now print in the existing once a second Serial report: `amy render load
+%`, worst render time, worst full block time, against the real budget
+(`AMY_BLOCK_US`). Confirmed `AMY_BLOCK_SIZE` is 256 samples (48kHz, not
+overridden), a 5333us budget per block, matching the report line's
+existing "~375 blocks/s" figure.
+
+Also confirmed `LOOPANINI_DRUM_OSC_BASE` (240) + `LOOPANINI_DRUM_OSC_COUNT`
+(8) sit inside AMY's real `max_oscs` default while checking this, read
+directly from `amy_default_config()` in `api.c`: 250, not the 180 that
+`docs/api.md`'s table currently says, the docs table is stale, the source
+is authoritative. Not an out of bounds bug, ruled out concretely rather
+than left as an open question.
+
+Not yet confirmed on hardware which of AMY's render cost, this project's
+own mixer/limiter/stutter cost, or something else (task priorities, other
+tasks stealing core 0 time) is actually the bottleneck, the new numbers
+should show that directly on the next test rather than needing another
+guess. `num_voices` is hardcoded to 6 in `synth_engine::setPatch()`,
+deliberately not raised yet, if the real problem is CPU time rather than
+voice allocation, more voices would make it worse, not better.
+
+**Update 2026-09-24 (ninth pass): first real load numbers, they point away
+from CPU/timing, added per channel Num Voices, and fixed a stale debug
+line found along the way.** First hardware numbers with the eighth pass
+instrumentation, "fan" sounding glitching past 3 held notes: amy render
+load 13-60% scaling with note count as expected, worst render up to
+~4957us (under the 5333us budget even at the worst single block seen),
+blocks/s held steady at ~187-189 throughout, matching real time. Worst
+block time ran ~7000-8200us regardless of render load, 13% or 60% alike,
+so it isn't scaling with polyphony either, most likely just the cost of
+two blocking full duplex I2S transfers (read then write) in one loop
+iteration rather than a sign of falling behind, blocks/s staying healthy
+across every sample supports that reading. Also fixed in passing: the
+report line's "healthy ~375" was simply wrong, a stale assumption from a
+128 sample block this project has never built with, `AMY_BLOCK_SIZE` has
+always been 256 (`~187` is correct, `stageCheck()` nearby already computed
+this correctly, only the per second report line hardcoded the wrong
+number).
+
+None of that points at a CPU/timing dropout at the polyphony levels
+tested so far, which is a real finding, not a null result: it means "fan
+sounding" glitching starting past 3 notes is more likely a synthesis or
+gain staging issue than a missed deadline. Two candidates worth testing
+directly rather than guessing further: AMY's own bus mixdown not auto
+compensating for active voice count, so summed voices can overload the
+bus internally before our mixer ever sees them (would get worse with
+`Int Max Gain Db` pushed above 0, which this project added two passes
+ago), or the Juno patch's own chorus effect (docs/juno_patches.md) simply
+becoming more audible/modulated sounding with more voices stacked through
+it, which is not a bug at all. Cheapest next test: set `Int Max Gain Db`
+back to 0 and replay the same 3+ note chord, if the glitch goes away or
+is much smaller, that implicates bus level summing made worse by the
+gain boost rather than anything AMY does by default.
+
+Also added, since it was asked for directly and is independently useful
+for this investigation either way: `Voices` (1-16, mono to AMY's normal
+polyphony) is now a real per channel setting on the AMY edit screen next
+to Channel/Patch/Volume (`ui.cpp`'s `AmyCh.voices`, `synth_engine::
+setVoices()`), not just a hardcoded 6. Lets testing polyphony thresholds
+directly rather than only by how many keys are held.
+
+**Update 2026-09-24 (tenth pass): a real, sourced -6dBFS bug found in AMY
+itself, and the limiter swapped for the one with automatic makeup gain.**
+Gain settings ruled out as the cause of the 3+ note glitch: hardware test
+showed `Int Max Gain Db` at 0 changed nothing, and the artifact was
+described as genuine hard digital clipping, not chorus, present even at
+low velocity, ruling out both "bus summing overload made worse by our
+gain boost" and "it's just the chorus" from the ninth pass. That plus "the
+limiter doesn't get any louder when turned down" pointed at the limiter
+itself rather than gain staging, so it was time to actually read AMY's own
+output stage instead of continuing to guess at our own code.
+
+Found `amy_fill_buffer()` (amy.c) halves every sample right after its own
+soft clipper on any `ESP_PLATFORM` build: `uintval >>= 1`, comment "For
+some reason, have to drop a bit to stop hard wrapping on esp?". Checked
+this isn't just an old comment nobody revisited: it is a real, currently
+open, maintainer filed bug, shorepine/amy#1169 ("ESP32 and Teensy 4.x
+output is halved (-6 dBFS ceiling) by an unexplained `>>= 1` after the
+soft clipper"), filed 2026-09-17, with a companion PR #1170 merged
+2026-09-22 that only excludes ESP32-P4, explicitly leaving Xtensa ESP32/S3
+(this board) still halved. The issue's own history traces the shift to a
+2023 port from Tulip, notes the current `i2s_std` 32 bit slot driver this
+project also uses is byte-for-byte the same conversion RP2040/RP2350 use
+*without* the shift and without wrapping, and that the shift "survived the
+driver migration without being re-tested". So every AMY sound on this
+board has been rendering at a hard -6dBFS ceiling this entire project,
+independent of patch, velocity or any volume setting, that is likely a
+real part of why AMY sounded quiet from the start.
+
+Fixed in `synth_engine.cpp`'s `renderBlock()`: doubles AMY's output with a
+clamp, undoing the halving in this project's own code rather than hand
+patching the vendored library (fragile against a Library Manager update,
+and would affect every other sketch using it, not just this one). Not
+proven whether this alone explains the hard-edge clipping at low velocity,
+still not confirmed on hardware, but it is a real, independently valuable
+fix either way, and the AMY issue itself raises the possibility that
+whatever "hard wrapping" the shift was guarding against is where a
+polyphony-correlated glitch could genuinely live, worth watching for after
+this fix lands.
+
+Separately, asked to actually research the other LOSER limiter (the one
+with automatic makeup gain, "auto turns up to compensate for the turn
+down") rather than keep MGA_JSLimiter, which only reduces gain and was
+correctly called out as not audibly doing anything. Fetched the real
+SP1LimiterJS source (this section always meant to use this one first, see
+the original bullet above) and ported it line for line, replacing
+MGA_JSLimiter everywhere in `ui.cpp`: `limiterStep()`/`limiterCoefs()`/
+`applyLimiter()`, `LimiterState` down to a single one pole filter state.
+Caught and fixed a real bug in the first port attempt before it shipped:
+scaled the threshold up to int16 magnitude to match the signal, which
+made `gain` come out in the thousands and crushed everything toward
+silence instead of riding it up to the threshold, the source's own
+`thresh`/`rms`/`gain` all live in its native -1..1 normalized domain, not
+int16 magnitude, fixed by normalizing peak/rms inside `limiterStep`
+instead. `Int Max Gain Db`/`Ext Max Gain Db` (ninth pass) and `Lim Rel Ms`
+(original spec, an MGA-only concept, SP1 hardcodes a fixed ~10Hz envelope
+lowpass with no separate release control) are removed from Config, the
+first pair is redundant with SP1's own automatic makeup gain and the
+second no longer controls anything. Not yet confirmed on hardware.
+
+**Update 2026-09-24 (eleventh pass): this was never a gain/DSP problem,
+it's a real-time dropout, tenth pass's fixes did not help.** Hardware
+test after the tenth pass: "just as bad... chopped like square wave
+tremolo," a reboot with enough notes, crackle that gets worse just from
+touching the screen or changing screens, and present "even at low
+volumes, its totally gain independant like waveform gaps." That last
+point rules out every gain/limiter/DSP theory from every prior pass at
+once: a limiter or a gain stage can attenuate or distort a sample, it
+cannot blank one out. Literal gaps in the waveform, independent of level,
+are a dropped or late audio block, this project's own words for it
+("getting interrupted somewhere") match the evidence. `Int Max Gain Db` /
+`Ext Max Gain Db` (ninth pass, removed tenth pass) are back, default 12
+dropped to 6, direct feedback that removing them made things sound worse,
+not just redundant with SP1 as reasoned at the time, they stack with SP1's
+makeup gain rather than replacing it.
+
+Checked, ruled out concretely rather than guessed: `M5ModuleAudio::
+record(uint8_t*,int)` / `play(const uint8_t*,int)`, the exact overloads
+`audio_io.cpp` calls, are pure `I2S.readBytes()`/`I2S.write()`, no I2C
+traffic in that path at all, so a shared I2C bus with the touch controller
+is not the mechanism. The touch/screen-nav correlation plus the reboot
+under load both still point at something stalling core 0 (the audio task)
+from core 1 (UI, and USB host MIDI polling, both core 1 per config.h),
+most likely at the interrupt or cache level rather than FreeRTOS task
+scheduling, since the two are already correctly pinned to separate cores,
+that isolation only holds for task scheduling, not for hardware level
+stalls like a flash cache disable that both cores share regardless of
+pinning. Module USB (MAX3421E) is SPI, sharing a bus with the LCD by this
+project's own design (`spi_lock.h`), and runs a continuous polling task on
+core 1, unconfirmed whether that specific bus is implicated or whether
+this is closer to the flash/cache mechanism, needs a real test rather
+than more reading.
+
+Also wired AMY's own overload failsafe hook (`amy_config.
+amy_external_overload_hook`, armed since the ninth pass's `amy_overload_
+check()` call but never actually logged anywhere visible: AMY's own
+message for it goes to plain `stderr`, not the USB CDC port `debug_io.h`
+uses) to print through `debug_io` when it fires, `synth_engine.cpp`'s
+`onOverload()`. If AMY's failsafe is what is causing the repeated silence
+plus reset, this line will say so directly and unambiguously on the next
+test, if it does not appear at all while the tremolo is happening, that
+rules AMY's own failsafe out and points more firmly at the I2S/task
+timing layer this project owns.
+
+Two cheap tests queued for the next hardware session rather than another
+guessed code change: does the tremolo/crackle happen at all with
+`LOOPANINI_ENABLE_USB_HOST` set to 0 (isolates Module USB's continuous
+SPI polling as the cause), and does it happen with the screen simply left
+alone, untouched, at the same polyphony (isolates the UI/touch side
+specifically from USB host). Not yet confirmed on hardware.
+
+**Update 2026-09-24 (twelfth pass): found and fixed the Mixer screen's
+part of it, the USB host test cleared USB host of the "over 4 poly"
+symptom specifically.** Both queued tests came back with real, precise
+data instead of a plain yes/no: same symptoms with USB host disabled and
+USB device MIDI used instead, which rules out Module USB's SPI polling as
+the cause of the polyphony linked glitch specifically, that one is
+screen independent and transport independent, still unexplained, most
+likely genuine render/mix CPU cost now that gain staging is ruled out.
+
+But a second, much more precise observation landed alongside it: aux's
+big pops only happen on the Mixer screen, specifically when aux is
+unmuted, and stop when it is muted. That pinpoints it, muting a channel
+does not change any SPI traffic, it only changes whether that channel's
+share of a general dropout is audible (silence times a gap is still
+silence), so this reads as "the Mixer screen causes a general dropout,
+and you can only hear it on whichever channel has real signal running,"
+not "muting aux specifically prevents something."
+
+Read `ui.cpp`'s `tick()`: whenever idling on the Mixer screen, it was
+redrawing and `pushSprite()`-ing all 4 meter columns unconditionally, on
+a 40ms timer, real signal movement or not: up to 100 SPI transactions a
+second just from sitting on that screen, on top of whatever touch
+elsewhere adds, going through the shared LCD/Module USB `spi_lock`. No
+other screen does anything like this, they only redraw on an actual state
+change (`dirty`), which fits why this project's own testing kept landing
+back on the Mixer screen specifically. `audio_io.cpp`'s I2S calls carry no
+SPI at all (checked, not guessed, see the eleventh pass note), so this
+isn't shared-bus contention with the audio driver itself, more likely
+either the shared `spi_lock` extending how long the LCD holds the bus, or
+a lower level DMA/cache collision between the display's SPI DMA and I2S's
+own DMA that doesn't care about task pinning. Either way, less SPI
+traffic here directly reduces the collision window regardless of which
+exact layer it is.
+
+Fixed: the Mixer meter redraw is now throttled to 10/s (was 25/s) and
+skips any column whose displayed level, fader position, or mute state
+has not moved enough to look different, rather than re-pushing a pixel
+identical sprite over SPI. Not a fix for the screen independent "over 4
+poly" symptom, that one still needs real data: watch the render load line
+(now with the overload hook logging audibly and visibly if AMY's own
+failsafe is what's firing) as poly crosses 4, on whichever screen and
+MIDI transport reproduces it most reliably. Not yet confirmed on
+hardware.
+
+**Update 2026-09-24 (thirteenth pass): confirmed the Mixer fix (no more
+pops anywhere), and found why "worst mix" was so large.** Twelfth pass's
+SPI throttle confirmed fixed on hardware, aux is clean. New data for the
+still open "4+ poly" symptom: blocks/s genuinely dropping under load (188
+down to 180 against a healthy ~187) is real evidence of falling behind,
+not just perception, but "worst mix" (`ui::processBlock`'s own time, not
+AMY's) was 2664-3616us, climbing with load, which is far more than that
+function's actual arithmetic should ever cost on this core; that pointed
+at the function itself, not just AMY's render.
+
+Found it: `limiterGain` (called `limiterStep` before this pass) ran once
+per FRAME per channel, and calls `sqrtf()` once each time, for the SP1
+envelope's `sqrt(lowpass(peak))` term (see the tenth pass note). Once per
+frame per channel across INT/EXT/Main inline plus LOP's `applyLimiter()`
+is 4 `sqrtf()` calls per frame, times 256 frames, is 1024 `sqrtf()` calls
+every single block, a scale of call this function's actual DSP need never
+called for. Restructured all four call sites to a two pass form: a cheap
+peak-only scan (no sqrt, no filter state) across the whole block, one
+`limiterGain()` call using that block's peak, then a flat divide across
+every sample, 4 `sqrtf()` calls a block instead of 1024. This quantizes
+the envelope's smoothed component to block granularity (~5.3ms). Stated
+here at the time as "well under the SP1 filter's own ~100ms time
+constant", that number was wrong, corrected in the fourteenth pass below:
+a 10Hz one pole's actual time constant is ~15.9ms (tau = 1/(2*pi*10)),
+100ms is that corner frequency's period, a different quantity, likely
+bled in from the old MGA release default (200ms) this project no longer
+uses. The conclusion (block granularity is fine here) still holds, see
+below for why.
+
+Not fully explained: why "worst mix" scaled up with note count at all,
+since this function's operation count never depended on active oscillator
+count, only block size. Most likely cache effects from AMY's own render
+touching more memory as more oscillators render, leaving `processBlock`'s
+own buffers colder, though not confirmed, this is offered as the honest
+leading guess, not a traced fact the way the call count above is. Not yet
+confirmed on hardware whether this closes the "4+ poly" symptom or only
+shrinks it, next test's render load numbers will show directly.
+
+**Update 2026-09-24 (fourteenth pass): better on hardware, but a new wall
+at 6 voices ("flutter"), and a direct question about whether block
+granularity (5.3ms) is actually the right polling rate.** Worth answering
+precisely rather than just reassuring: the two things in `limiterGain()`
+have different timing needs and only one of them cares about polling
+rate at all.
+- The smoothed component (`st.t`, the one pole "envelope filter") has a
+  ~15.9ms time constant (`tau = 1/(2*pi*10)` for a 10Hz corner, corrected
+  above), not the ~100ms this section said last pass. For that component
+  alone, updating every 5.3ms versus every ~16ms would sound close to
+  identical, a lowpass filter cannot "see" input changes much faster than
+  its own time constant regardless of how often you feed it.
+- The instant attack component (`max(smoothed, peak)`) is different: this
+  project's `limiterGain()` is handed that whole block's own true peak
+  before gaining that same block, so there is no added latency beyond the
+  block itself, a loud sample anywhere in a block is already accounted
+  for in the gain applied to that same block. Stretching the poll interval
+  past one block (say, every 2-3 blocks) would start to cost real attack
+  accuracy: a transient in a skipped block would be gained using a stale
+  peak from an earlier block instead of its own, i.e. it could get
+  through under-limited. 5.3ms is not an arbitrary default here, it is
+  the natural size where "the data we already have in hand" and "fast
+  enough to catch a transient in the block it happens in" are the same
+  thing for free.
+- Net: block granularity (5.3ms) is the right choice, not a cost to poll
+  less often for. It also is not a meaningful cost any more regardless,
+  the fix that mattered was call COUNT (1024 to 4 a block), not rate; 4
+  `sqrtf()` calls a block is close to free on this core.
+
+So the 6 voice wall is most likely not `limiterGain()` any more. Leading
+candidates, not yet confirmed: genuine AMY render cost (Juno style voices
+use ~5 oscillators each per synth.md, so 6 voices on one channel is ~30
+active oscillators, a real, unavoidable compute cost, not a bug), or the
+still unexplained cache effect from the thirteenth pass. Next step is the
+same render load line, specifically watching whether "worst render" (AMY)
+or "worst mix" (this project's own code) is what grows at the 6 voice
+wall, that tells them apart. Not yet confirmed on hardware.
+
+**Update 2026-09-24 (fifteenth pass): confirmed, with real data and a
+real upstream GitHub issue, this is genuine AMY render cost at 6 voice
+chords, already partly optimized upstream, likely a practical ceiling
+rather than a bug.** Fresh hardware numbers at the 6 voice wall settle
+the "worst render vs worst mix" question directly: worst render hit
+5297us (99% of the entire 5333us block budget, by AMY's synthesis alone)
+at 55% smoothed render load, worst mix stayed flat around 1700-2200us
+the whole time, both quiet and loud. That confirms the thirteenth pass's
+`sqrtf()` fix actually worked (`processBlock` is no longer scaling with
+load) and confirms the remaining cost is squarely AMY's own render, not
+this project's code.
+
+Decoded patch 0 (`patches.h`, "Juno A11 Brass Set 1") directly rather
+than trusting the generic ~5 osc/voice figure from synth.md: its wire
+string references `v0` through `v5`, 6 oscillators per voice, not 5, so 6
+voices is ~36 active oscillators for that one channel, plus it carries a
+filter (`F...`) and, per the patch table's own convention, the Juno
+chorus. Searched shorepine/amy's issues for prior art rather than
+guessing further: **issue #779, "BillieJeanScheduled has dropouts on
+AMYboard... when the chords come in"**, root caused in PR #780 to
+`amp_combine_controls()` doing "a `powf(10,x)` plus up to ~8 `log2f`
+calls per audible oscillator, per render block", with the exact line **"A
+6-voice chord (+ bass + drums) multiplies that into a render overrun"**,
+same threshold this project independently landed on. Follow up issue #783
+flagged sibling hot paths with the same shape (`freq_of_logfreq()`'s
+`exp2f`, `filter_process()`'s `cosf`/`sinf`, both called per oscillator
+per block, uncached).
+
+Checked our installed copy (`library.properties`: 1.2.171) rather than
+assuming it's current: all three fixes are already there, `amy.h`'s
+`#pragma GCC optimize ("O2")` (the `-Os`-by-default Arduino build was
+half of #779's root cause), `amp_combine_controls()`'s zero-coef skip,
+and both `freq_of_logfreq()` and `filters.c`'s biquad generators now call
+`exp2_lut()`/`cos2pi()`/`sin2pi()` with the raw `exp2f`/`cosf`/`sinf`
+calls left commented out in place. So this project already has every
+known fix for this exact class of problem, and is still hitting the
+render budget at 6 voices on a filtered, chorused patch, that reads as a
+real, current, near-ceiling compute cost for this hardware rather than a
+remaining bug to find. `AMY_USE_FIXEDPOINT` is also already unconditional
+in this AMY version ("Always use fixed point"), not a lever to flip.
+
+Only remaining cheap, unverified lever: confirm the Arduino IDE's CPU
+Frequency board menu is actually set to this chip's maximum (240MHz for
+S3), rather than a lower default. Not yet confirmed. Otherwise, the
+practical path from here is managing the cost (the `Voices` per channel
+setting added two passes ago, keeping heavy filtered/chorused patches at
+lower polyphony) rather than continuing to look for another bug.
+
+**Update 2026-09-24 (sixteenth pass): CPU frequency confirmed already
+maxed, so on to patch names, a standard OK button, and settings
+persistence, with per channel effects and an SD folder-as-voice picker
+queued next rather than attempted in the same pass.** Four things landed:
+
+- **Patch names.** AMY exposes no runtime name API (checked `docs/api.md`
+  and the whole source tree, not guessed), the "N: Name" the patch table
+  carries are C comments, compiled out entirely. Wrote a one-time
+  extraction script (parses `patches.h`'s own comments) that generated
+  `loopanini/src/patch_names.h`, 391 entries, 266 named, regenerate it the
+  same way if `AMY_Synthesizer`'s `patches.h` ever changes. The AMY
+  screen's Patch row now opens a dedicated named picker (`drawPatchPicker`/
+  `pressPatchPicker` in `ui.cpp`) instead of the punch in editor, opens
+  scrolled to the current patch, current patch highlighted. `drawList`'s
+  usual page dot strip does not scale to this many pages (391 patches / 5
+  a page = 79, `drawList`'s `130/pages` segment height rounds to nothing
+  past ~65 pages, a real latent bug in that shared widget, left alone
+  since nothing else currently has that many rows, but worth knowing
+  about before reusing `drawList` for anything else this large), the
+  picker shows "page/pages" as text instead. The AMY summary grid's 2x2
+  cells show the patch name now too, not just its number.
+- **Big OK button.** Standard on every number pad screen now, filling the
+  right column's blank space below Up/Down (and Tap, when present),
+  alongside the small OK tile already in the digit grid, same action.
+- **Settings persistence.** `Preferences` (NVS), one fixed size
+  `PersistedSettings` struct written/read as raw bytes rather than dozens
+  of individual keys, magic + version guard against a future field
+  addition silently misreading old data instead of corrupting it quietly.
+  Debounced rather than hooked into every mute/drag/edit call site:
+  `tick()` diffs a fresh snapshot against the last saved one every 3s and
+  only writes when something changed, so a fader drag doesn't hammer
+  flash and no mutation site can be missed by forgetting to mark it dirty.
+  Covers mixer levels/mutes/solos/rec-enable, limiter thresholds, every
+  Config value, all 4 AMY channels' chan/patch/vol/voices, and BPM/
+  measures. Loading forces `amySeen`/`amyChanSeen` to an impossible
+  sentinel so `applyAmy()`'s first pass after boot always pushes every
+  loaded value to AMY, even one that happens to match a fresh boot's own
+  default, rather than silently no-op'ing because the seen/current pair
+  already matched.
+
+Queued next, not attempted this pass, each is its own real UI surface:
+per channel effects (echo/chorus/reverb/dist) on/off plus their
+parameters, an SD folder picker to use as a channel's voice source
+instead of a baked in patch, and written setup instructions for that
+folder convention. On the "turn off chorus for headroom" idea
+specifically: worth building regardless since it was asked for directly,
+but set the expectation honestly, the fifteenth pass's actual scaling
+cost was oscillator/filter render (`freq_of_logfreq`, `amp_combine_
+controls`, `filter_process`, per audible oscillator), not the bus level
+chorus/echo/reverb effects, so this is unlikely to be the dominant lever
+for the 6 voice wall, more likely a smaller, separate, still real saving
+(chorus specifically runs a per-sample delay line per bus). Not yet
+confirmed on hardware.
+
+**Update 2026-09-24 (seventeenth pass): four direct UI corrections to the
+sixteenth pass's work.** All in `ui.cpp`:
+- The small "OK" tile in the number pad's digit grid is gone, the big OK
+  added last pass was meant to replace it, not sit alongside it. Grid is
+  11 keys now (1-9, C, 0), last grid slot just blank.
+- MIDI Chan's row opens a 4x4 grid of 16 buttons (`drawChanPicker`/
+  `pressChanPicker`) instead of the punch in editor, same treatment
+  Patch got two passes ago, picking a channel is a single tap.
+- The AMY summary screen's patch names were being cut at a guessed
+  15-character count. Replaced with `truncateToWidth()`, which measures
+  the real pixel width via M5GFX's `textWidth()` and drops characters
+  until it actually fits the box, a fixed character count is wrong in
+  both directions depending on which letters a given name has (proportional
+  font) and was never checked against the real font metrics to begin with.
+- Bottom nav (the touch strip below the screen) used to do nothing at all
+  from inside any box with its own red X (the numeric editor, an AMY
+  channel's view, the patch/channel pickers), the gesture was silently
+  swallowed. It now closes whichever of those is open first, same as
+  tapping its own X, then navigates, so bottom nav always means "leave to
+  the next/prev main screen" regardless of what is open.
+
+Not yet confirmed on hardware.
 
 Main out's Solo spot (soloing the final mix has no meaning) is now a hollow
 toggle button showing the 3 letter label of the column it targets (LOP,
@@ -729,6 +1322,134 @@ text nudged 1px down and right (Mute, Solo, Limiter, the Pump button, this new
 toggle), the loop-record buttons (icon only, no text) are unchanged. The 4
 fader handles moved 1px left. The 3 vertical divider lines between columns are
 gone.
+
+**Update 2026-09-25 (eighteenth pass): power off actually powers off, one
+more label fix, a real quiet period save debounce, and patch picking
+redesigned into categories. Plus a large backlog captured in full so none
+of it gets lost, most of it not attempted yet.**
+
+Landed:
+- **Power off.** Holding CoreS3's power button looked like it turned the
+  board off (screen went dark) while it kept running and draining the
+  battery, because nothing in this sketch ever called `M5.Power.
+  powerOff()`. CoreS3 only exposes `BtnPWR` (M5Unified's own button
+  table), and unlike some M5 devices its long press is not a hardware
+  only cutoff, the firmware has to notice the hold and actually act.
+  `loopanini.ino`'s `loop()` now calls `M5.Power.powerOff()` on `M5.BtnPWR.
+  wasHold()`. Not yet confirmed on hardware.
+- **Int/Ext Max Gain's Config label** was overflowing its row, cut off
+  right after "Gain". Shortened to "Int Max Gain"/"Ext Max Gain" (dropped
+  " Db", which was the part getting clipped).
+- **Settings persistence is now a true quiet period debounce**, not
+  "write every N seconds while dirty": the seventeenth pass's version
+  would actually write mid gesture during a long continuous fader drag,
+  since it re-checked and saved every 3s regardless of whether the value
+  was still moving. `ui.cpp`'s `maybeSaveSettings()` now tracks a
+  `pendingSaved` snapshot and only commits to flash once that snapshot
+  has been stable for `kSettingsQuietMs` (5000ms), matching the
+  standard requested for the effects parameters below, applied generally
+  since the underlying concern (an NVS write catching the flash bus mid
+  live tweak) isn't specific to effects.
+- **Patch picking is a category menu now**: Juno-6, DX-7, Drum Kit,
+  Custom, SD Card, a right pointing triangle marks whichever category the
+  current patch is actually in. Juno-6 (patches 0-127) and DX-7 (128-255)
+  are contiguous ranges; Drum Kit is a curated list (`kDrumKitPatches`:
+  258, 384-390), AMY's patch table names real standalone kits "MIDI
+  drums ..." / "drum kit N ...", a few ordinary Juno/DX7 patches also
+  have "drum" in their own name (Steel Drums, LOG DRUM) without being a
+  kit, so this was hand picked from `patch_names.h` rather than pattern
+  matched. Custom and SD Card show in the menu, greyed, not wired to
+  anything yet, that's the "Custom preset intake" and "SD folder as
+  voice" backlog below. Drilling into Juno-6/DX-7/Drum Kit reuses the
+  seventeenth pass's paginated list, now with the same page arrows and
+  segmented index strip Config uses (dropped last pass only because it
+  breaks past ~65 pages, a single category tops out at 26, so it's back
+  and safe). Upper left X goes back one screen (out of a category to the
+  menu, out of the menu to the AMY channel's param list), not straight to
+  fully closed.
+
+**Backlog, captured in full, not attempted this pass:**
+
+**1. Custom patch intake + SD folder as voice source.** The "Custom"
+category should hold patches sent from the AMYboard/Tulip web editor over
+MIDI (the user sends from that editor "on ch1"), captured and written as
+a file in an SD `Custom/` folder, with a placeholder filename the user
+can see and rename from a computer (SD card pulled or mounted), not
+hidden. The "SD Card" category should browse folders on the SD card and
+load one as a channel's voice, this needs an actual folder browser UI,
+nothing like it exists yet (`sample_bank.h`'s kit loading only handles
+one hardcoded dir, `LOOPANINI_SD_KIT_DIR`, for channel 10 drums, not a
+picker). To keep the SD Card category's folder list from also showing
+`Custom/` (patch files, not sample kits, would look like a bogus "folder"
+entry there), either exclude that one name specifically, or root the SD
+Card browser at a subfolder (the user's own suggestion: something like
+`Samples/`) so `Custom/` sits outside it naturally, simpler, prefer this
+if it doesn't complicate the eventual `LOOPANINI_SD_KIT_DIR`-style config.
+**Needs research before writing any of this**: does AMY (or the Tulip/
+AMYboard ecosystem it comes from) already have a standard on-disk patch
+file format / a documented way the web editor exports what it sends over
+MIDI, so a receiving Custom file is compatible with that ecosystem rather
+than inventing a new ad hoc one. Look this up (their docs, their web
+editor's own source/export code, their sysex or MIDI patch-dump
+convention if any) before designing the file format, adhere to it as far
+as practical per the user's own instruction, don't guess a format.
+
+**2. Per channel effects menu.** Each of the 4 AMY channels needs an
+Effects entry (from the AMY edit screen) with a submenu per effect:
+EQ, lowpass filter with resonance, chorus, reverb, echo, distortion,
+saturation (Ableton style), matching what AMY's own web editor exposes
+as inspiration. Adjusting one **overrides whatever that channel's loaded
+patch itself already sets for that effect** (patches encode their own
+chorus/eq/etc in their patch string), a live manual layer on top, not a
+replacement of the patch system. Persisted, using the same quiet period
+debounce landed this pass. **Each effect needs an easy on/off**, framed
+explicitly around managing CPU headroom for polyphony (echoing the
+fifteenth pass's finding that chorus/echo/reverb are bus level, not the
+per-oscillator render cost that actually caused the 6-voice wall, so
+expect these toggles to matter less for headroom than that framing
+hopes, still worth having both for the CPU angle and because they're
+directly useful controls regardless). Known AMY API surface, from
+`docs/api.md`, to build these against:
+  - Chorus: `chorus_level, chorus_max_delay, chorus_lfo_freq, chorus_depth`
+    (`amy.send(bus=N, chorus=...)`).
+  - Reverb: `reverb_level, reverb_liveness, reverb_damping, reverb_xover_hz`.
+  - Echo: `echo_level, echo_delay_ms, echo_max_delay_ms, echo_feedback,
+    echo_filter_coef` (-1 HPF, 0 flat, +1 LPF).
+  - Distortion: `dist_clip`/`dist_fold` (on/off, stack in clip/fold/crush
+    order), `dist_drive` (pre-gain), `dist_mix` (wet/dry). At bus scope
+    (no `osc` in the event) this addresses the bus's own distortion stage.
+  - EQ: exists (`eq` command, 3 band, seen in the Juno patch string
+    format itself, `x7,-3,-3` style), needs its exact parameter names
+    confirmed from `docs/api.md` before building the UI, not assumed from
+    memory the way the four above are (those were read directly this
+    session).
+  - Lowpass + resonance and saturation: **not confirmed as bus level AMY
+    features**, AMY's filter (`filter_process()`, the 6-voice wall's own
+    hot path) is per oscillator, set via a patch's own filter fields, not
+    obviously a bus effect the way chorus/reverb/echo are. If there is no
+    bus level equivalent, "implement simply" per the user's own
+    instruction: a basic one/two-pole lowpass with a resonance parameter
+    and a simple waveshaper for saturation, run in this project's own
+    mixer code (`ui::processBlock()`) the same layer the limiter already
+    lives in, one instance per channel, gated by that channel's on/off
+    same as the AMY-native effects. Needs each channel actually assigned
+    to its own AMY bus first (`synth=N, bus=N`-style, or the drum
+    oscillators' own `bus` field for channel 10) for the AMY-native
+    effects (chorus/reverb/echo/dist/eq) to be independent per channel at
+    all, right now every channel's oscillators are on AMY's default bus
+    0 together, confirm `AMY_DEFAULT_NUM_BUSES` (4) or raise `max_buses`
+    covers 4 independent channels cleanly before assuming it does.
+
+**3. A new combo effect, not from AMY, built by this project**: a
+"musical beat matched tremolo, vibrato, and univibe-style chorus combo"
+with three selectable modes (tremolo = amplitude modulation, vibrato =
+pitch modulation, univibe-style = phaser/chorus character), all locked to
+BPM (internal clock or incoming MIDI clock, this project already has a
+BPM concept for the looper to sync to). This is genuinely new DSP this
+project has to design, not an AMY parameter to expose, scope it as its
+own real effect (rate as a beat division like the Stutter grid's, depth,
+mode select) when it's taken up, not squeezed in as an afterthought
+alongside the effects menu above.
 
 ### Status 2026-09-23: aux in is live
 

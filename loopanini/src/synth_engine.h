@@ -19,9 +19,12 @@ void begin();
 int16_t *renderBlock();
 
 // Live parameter changes from the UI. Safe from any task (amy_add_event queues).
-void setPatch(int synth, int patch);
+void setPatch(int synth, int patch, int voices);
 void setLevel(int synth, float level0to1);
 void setChannel(int synth, int newChannel);  // moves a synth to a different MIDI channel (to_synth)
+// 1 = mono. Can be sent alone, AMY keeps the synth's current patch/sound and
+// just changes the voice count, see docs/synth.md.
+void setVoices(int synth, int voices);
 
 // Loads a kit from LOOPANINI_SD_KIT_DIR (see sample_bank.h) and switches
 // channel 10 to sample playback for any note the kit covers; notes the kit

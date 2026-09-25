@@ -167,10 +167,26 @@ void audioTask(void *) {
   uint32_t last_report_ms = 0;
   uint32_t last_blocks = 0;
   uint32_t last_failures = 0;
+  uint32_t render_us_max = 0;  // worst AMY render this report period
+  uint32_t mix_us_max = 0;     // worst ui::processBlock (mixer/limiter/stutter) this period
+  uint32_t block_us_max = 0;   // worst full block (render+mix+I2S) this period
+  const uint32_t kHealthyBlocksPerSec = LOOPANINI_SAMPLE_RATE / AMY_BLOCK_SIZE;
   for (;;) {
     midi_io::poll();
     midi_din::poll();
+    const uint32_t block_t0 = micros();
     int16_t *block = synth_engine::renderBlock();
+    // AMY's own render_load tracking (docs/api.md's amy.render_load()) is
+    // opt in: amy_overload_check() only runs from AMY's own i2s.c platform
+    // loop, which we don't use (ModuleAudio owns I2S here), so without this
+    // call amy_get_render_load() would just read 0 forever and AMY's built
+    // in overload failsafe (config.overload_threshold, default 98% for
+    // 250ms) would never arm. Timed around renderBlock() specifically,
+    // that's the call whose cost scales with polyphony/oscillator count,
+    // matching what the failsafe is meant to catch.
+    const uint32_t render_us = micros() - block_t0;
+    amy_overload_check(render_us);
+    if (render_us > render_us_max) render_us_max = render_us;
     // Aux in (ModuleAudio's mic/line jack): read even if nothing has it
     // record-enabled or unmuted, so the meter and any live stutter on it
     // stay correct the instant either is turned on. A failed read (module
@@ -181,7 +197,10 @@ void audioTask(void *) {
     if (!audio_io::readBlock(aux_block, AMY_BLOCK_SIZE)) {
       memset(aux_block, 0, sizeof(aux_block));
     }
+    const uint32_t mix_t0 = micros();
     ui::processBlock(block, aux_block, AMY_BLOCK_SIZE);
+    const uint32_t mix_us = micros() - mix_t0;
+    if (mix_us > mix_us_max) mix_us_max = mix_us;
     if (!audio_io::writeBlock(block, AMY_BLOCK_SIZE)) {
       write_failures = write_failures + 1;
       // A failed write returns immediately instead of blocking on the I2S
@@ -193,15 +212,29 @@ void audioTask(void *) {
     }
     usb_audio_out::writeBlock(block, AMY_BLOCK_SIZE);
     blocks_rendered = blocks_rendered + 1;
+    const uint32_t block_us = micros() - block_t0;
+    if (block_us > block_us_max) block_us_max = block_us;
 
     const uint32_t now = millis();
     if (now - last_report_ms >= 1000) {
       last_report_ms = now;
       const uint32_t blocks = blocks_rendered;
       const uint32_t failures = write_failures;
-      debug_io::out().printf("audio: +%lu blocks/s (healthy ~375), write failures +%lu (total %lu)\n",
-                              (unsigned long)(blocks - last_blocks),
-                              (unsigned long)(failures - last_failures), (unsigned long)failures);
+      // healthy rate is LOOPANINI_SAMPLE_RATE / AMY_BLOCK_SIZE (~187 at
+      // 48kHz/256), same formula stageCheck() uses above, not the "~375"
+      // this line used to hardcode, that number assumed a 128 sample block
+      // this project has never actually used.
+      debug_io::out().printf(
+          "audio: +%lu blocks/s (healthy ~%lu), write failures +%lu (total %lu), "
+          "amy render load %.0f%%, worst render %luus, worst mix %luus, worst block %luus "
+          "(budget %luus)\n",
+          (unsigned long)(blocks - last_blocks), (unsigned long)kHealthyBlocksPerSec,
+          (unsigned long)(failures - last_failures), (unsigned long)failures,
+          amy_get_render_load() * 100.0f, (unsigned long)render_us_max, (unsigned long)mix_us_max,
+          (unsigned long)block_us_max, (unsigned long)AMY_BLOCK_US);
+      render_us_max = 0;
+      mix_us_max = 0;
+      block_us_max = 0;
       last_blocks = blocks;
       last_failures = failures;
     }
@@ -315,6 +348,17 @@ void setup() {
 
 void loop() {
   ui::update();
+  // CoreS3 only exposes BtnPWR (M5Unified's own button table), and its long
+  // press is not a hardware-only cutoff the way some M5 devices' power
+  // buttons are, the firmware has to notice the hold and actually call
+  // M5.Power.powerOff() itself. Nothing in this sketch did that before, so
+  // "holding power to turn off" looked like it worked (screen goes dark)
+  // while the board, ModuleAudio, USB host, everything, kept running and
+  // draining the battery the whole time it looked off.
+  if (M5.BtnPWR.wasHold()) {
+    M5.Display.fillScreen(TFT_BLACK);
+    M5.Power.powerOff();
+  }
   pollCommands();
   delay(5);
 }

@@ -94,8 +94,20 @@ bool begin() {
 bool readBlock(int16_t *buffer, size_t sample_count) {
   // Stereo interleaved, so a block of sample_count samples per channel is
   // sample_count * 2 int16_t's.
-  return device.record(reinterpret_cast<uint8_t *>(buffer),
-                        static_cast<int>(sample_count * 2 * sizeof(int16_t)));
+  const bool ok = device.record(reinterpret_cast<uint8_t *>(buffer),
+                                 static_cast<int>(sample_count * 2 * sizeof(int16_t)));
+  if (ok) {
+    // ModuleAudio's inputs are mono mic jacks, not a stereo pair: M5Stack's
+    // own product spec lists "2-channel mic input" (two independent mono mic
+    // paths, one per 3.5mm jack), and the driver docs confirm both jacks
+    // share the ES8388's single LIN1 pin. RIN1 is unwired on this input, so
+    // its captured samples are floating-pin noise, not signal, that's the
+    // crackle a real stereo source shows on the right channel. Fold left
+    // into right here, once, so every consumer downstream (mixer, looper,
+    // stutter, meters) sees clean mono-as-stereo instead of noise.
+    for (size_t i = 0; i < sample_count; i++) buffer[2 * i + 1] = buffer[2 * i];
+  }
+  return ok;
 }
 
 bool writeBlock(const int16_t *buffer, size_t sample_count) {
