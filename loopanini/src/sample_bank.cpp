@@ -215,4 +215,71 @@ bool loadPitchedSample(int chIndex, const char *path) {
 bool hasPitched(int chIndex) { return chIndex >= 0 && chIndex < kMaxPitched && pitchedLoaded[chIndex]; }
 int pitchedPreset(int chIndex) { return LOOPANINI_PITCHED_PRESET_BASE + chIndex; }
 
+bool saveCustomPatch(const char *wireText) {
+  if (!sdReady) return false;
+  if (!SD.exists(LOOPANINI_SD_CUSTOM_DIR)) SD.mkdir(LOOPANINI_SD_CUSTOM_DIR);
+  char path[48];
+  int n = 1;
+  for (; n <= 999; n++) {
+    snprintf(path, sizeof(path), "%s/patch%03d.txt", LOOPANINI_SD_CUSTOM_DIR, n);
+    if (!SD.exists(path)) break;
+  }
+  File f = SD.open(path, FILE_WRITE);
+  if (!f) {
+    debug_io::out().printf("sample_bank: could not create %s.\n", path);
+    return false;
+  }
+  f.print(wireText);
+  f.close();
+  debug_io::out().printf("sample_bank: saved custom patch to %s.\n", path);
+  return true;
+}
+
+int listCustomPatches(char names[][24], int maxNames) {
+  if (!sdReady) return 0;
+  File d = SD.open(LOOPANINI_SD_CUSTOM_DIR);
+  if (!d || !d.isDirectory()) return 0;
+  int count = 0;
+  for (File f = d.openNextFile(); f && count < maxNames; f = d.openNextFile()) {
+    if (!f.isDirectory()) {
+      snprintf(names[count], 24, "%s", f.name());
+      count++;
+    }
+    f.close();
+  }
+  d.close();
+  return count;
+}
+
+bool loadCustomPatch(const char *filename, char *out, size_t outSize) {
+  if (!sdReady) return false;
+  char path[48];
+  snprintf(path, sizeof(path), "%s/%s", LOOPANINI_SD_CUSTOM_DIR, filename);
+  File f = SD.open(path);
+  if (!f) return false;
+  const size_t n = f.readBytes(out, outSize - 1);
+  out[n] = 0;
+  f.close();
+  return true;
+}
+
+int listFolders(const char *root, char names[][24], int maxNames) {
+  if (!sdReady) return 0;
+  File d = SD.open(root);
+  if (!d || !d.isDirectory()) {
+    debug_io::out().printf("sample_bank: %s not found on SD.\n", root);
+    return 0;
+  }
+  int count = 0;
+  for (File f = d.openNextFile(); f && count < maxNames; f = d.openNextFile()) {
+    if (f.isDirectory()) {
+      snprintf(names[count], 24, "%s", f.name());
+      count++;
+    }
+    f.close();
+  }
+  d.close();
+  return count;
+}
+
 }  // namespace sample_bank

@@ -77,7 +77,9 @@ void poll() {
   if (!active) return;
   while (din.available()) {
     uint8_t b = static_cast<uint8_t>(din.read());
-    debug_io::out().printf("DIN MIDI in: %02X\n", b);
+    // Real time bytes (0xF8-0xFF) not logged, same reasoning as the other
+    // two transports, still fully processed below either way.
+    if (b < 0xF8) debug_io::out().printf("DIN MIDI in: %02X\n", b);
     amy_process_single_midi_byte(b, /*from_web_or_usb=*/0);
   }
 }

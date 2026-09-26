@@ -8,6 +8,7 @@
 // Library Manager install, see patches/README.md. usbh_midi.h itself pulls
 // in Usb.h the same way, so the whole tree resolves from here down.
 #include "USB_Host_Shield_Library_2.0/usbh_midi.h"
+#include "USB_Host_Shield_Library_2.0/usbhub.h"
 
 #include "config.h"
 #include "debug_io.h"
@@ -29,6 +30,12 @@ namespace {
 // code path exists that could reach a pin the guard hasn't approved.
 USB *usb = nullptr;
 USBH_MIDI *midi = nullptr;
+// Without this, a hub plugged into Module USB enumerates the hub itself
+// (or fails) but nothing ever polls its downstream ports, so whatever is
+// plugged into the hub is never seen. USB::Task() (called from poll(),
+// below) already walks every registered device class driver each call,
+// USBHub included, so registering it here is the only change a hub needs.
+USBHub *hub = nullptr;
 volatile bool ready = false;
 // The library never clears USB::devConfig[] and assumes a zero-filled global.
 // Heap memory is not zeroed, so a plain `new USB()` crashed in USB::Task().
@@ -54,6 +61,7 @@ bool begin() {
 
   usb = new (usbStorage) USB();
   midi = new USBH_MIDI(usb);
+  hub = new USBHub(usb);
   spi_lock::Guard lock;
   if (usb->Init() == -1) {
     debug_io::out().println(
@@ -100,8 +108,15 @@ void poll() {
   uint8_t msg[3];
   uint8_t len;
   while ((len = midi->RecvData(msg)) > 0) {
-    debug_io::out().printf("USB host MIDI in: %02X %02X %02X\n", msg[0],
-                            len > 1 ? msg[1] : 0, len > 2 ? msg[2] : 0);
+    // Real-time messages (0xF8-0xFF: clock, start/stop/continue, active
+    // sensing) are not logged, some controllers/DAWs send clock
+    // continuously (24 times a quarter note), which floods this debug
+    // line into unreadable spam. Still fully processed below, this only
+    // affects what gets printed.
+    if (msg[0] < 0xF8) {
+      debug_io::out().printf("USB host MIDI in: %02X %02X %02X\n", msg[0],
+                              len > 1 ? msg[1] : 0, len > 2 ? msg[2] : 0);
+    }
     if (len < 3 || !synth_engine::routeDrumNote(msg)) convert_midi_bytes_to_messages(msg, len, /*usb=*/1);
   }
 }

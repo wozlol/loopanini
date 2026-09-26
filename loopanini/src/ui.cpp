@@ -6,10 +6,13 @@
 
 #include <M5Unified.h>
 #include <Preferences.h>
+#include <esp_system.h>  // esp_restart(), Audio Out's Apply button
 
+#include "audio_io.h"
 #include "config.h"
 #include "looper.h"
 #include "patch_names.h"
+#include "sample_bank.h"
 #include "spi_lock.h"
 #include "stutter.h"
 #include "synth_engine.h"
@@ -54,6 +57,10 @@ volatile float gPeak[4] = {0, 0, 0, 0};       // audio task raises, UI task read
 
 int limiterIdx[4] = {0, 0, 0, 0};  // 0..6 means Threshold 0 to -6 dB (SP1LimiterJS's slider1)
 bool compOn = false;               // pump compressor (not applied yet)
+// Mixer's Main column row 1 reads this to fill its ring solid red. Always
+// false today, no master mix SD recorder exists yet (see FIRMWARE_PLAN.md's
+// Recording to SD section), the indicator is real, what it watches isn't.
+bool sdRecording = false;
 
 // SP1LimiterJS "Simple Peak-1 Limiter" (Michael Gruhn 2006, LOSER pack,
 // fetched from Samelot/Reaper's Effects/LOSER folder, ported line for line
@@ -82,11 +89,30 @@ struct Param {
 const char *const kRecStart[] = {"Level", "Now"};
 const char *const kSig[] = {"4/4", "3/4"};
 const char *const kOffOn[] = {"Off", "On"};
-const char *const kAudioOut[] = {"USB", "Aux", "Both"};
+// USB: class compliant audio to a host computer only. Ext: ModuleAudio's
+// analog jack only, named to match the Mixer screen's EXT column, not
+// Aux, same physical path. Ext+USB and Int+USB: exactly what they say.
+// Int: CoreS3's own speaker only. See audio_io.h's AnalogOut for why Ext
+// and Int are mutually exclusive but either combines freely with USB.
+const char *const kAudioOut[] = {"USB", "Ext", "Ext+USB", "Int", "Int+USB"};
 const char *const kStutTrack[] = {"Looper", "Synth", "Main", "Aux"};
 
+// Default 2 ("Both") matches this project's actual behavior before this
+// setting was wired up (Aux and USB both always ran unconditionally), so
+// an existing board's saved preference (or a fresh install with none)
+// boots into the same behavior it already had. Not restored by
+// applySettings, its true value comes from audio_io::outputPref() in
+// loadSettings instead, this is only a display/edit mirror, audio_io
+// needs the real value before ui exists, see maybeSaveSettings's comment.
 int cfgRecStart = 0, cfgSig = 0, cfgAutoOd = 0, cfgTm = 0, cfgTmGap = 0, cfgAudioOut = 2;
-int cfgSdRec = 0, cfgBpmMidi = 0, cfgStutTrack = 2;
+int cfgBpmMidi = 0, cfgStutTrack = 2;
+// 0-4 blocks of slack between render/mix and the actual hardware write,
+// see audio_io.h's setOutBufferBlocks. Default 0 matches today's direct,
+// lowest latency behavior, opt in for more headroom against an occasional
+// slow render (heavy polyphony) at the cost of a little fixed latency.
+// Unlike cfgAudioOut this is a pure software queue depth, no peripheral
+// to reinit, so it applies live, no reboot needed, see tick().
+int cfgOutBuffer = 0;
 // Int/Ext Max Gain Db: brought back per direct hardware feedback that it was
 // actually helping (removing it was this project's own reasoning that SP1's
 // makeup gain made it redundant, that reasoning was wrong, or at least not
@@ -101,17 +127,28 @@ int cfgIntMaxGainDb = 6, cfgExtMaxGainDb = 0;
 // for its automatic makeup gain, this setting is the tradeoff.
 
 const Param kConfig[] = {
+    // Tapping this row doesn't cycle it in place like every other row
+    // here, pressConfig opens drawAudioOutPicker instead, its own confirm
+    // and reboot screen: Int/Int+USB take effect on next boot only, not
+    // live, see audio_io.h, and silence ModuleAudio's own aux input jack
+    // while active, not just its output, the two are one coupled full
+    // duplex I2S peripheral on this board, there is no way to have one
+    // side of it off. USB (the class compliant interface to a host
+    // computer) is a fully separate subsystem from either analog path, no
+    // such restriction there. Kept first in this list, requested directly,
+    // pressConfig finds it by pointer identity rather than a hardcoded
+    // index so this and any future reordering stays safe.
+    {"Audio Out", &cfgAudioOut, 0, 4, kAudioOut},
     {"Rec Start", &cfgRecStart, 0, 1, kRecStart},
     {"Time Sig", &cfgSig, 0, 1, kSig},
     {"Auto Overdub", &cfgAutoOd, 0, 1, kOffOn},
     {"Time Machine", &cfgTm, 0, 1, kOffOn},
     {"TM Gap Beats", &cfgTmGap, 0, 4, nullptr},
-    {"Audio Out", &cfgAudioOut, 0, 2, kAudioOut},
-    {"SD Record", &cfgSdRec, 0, 1, kOffOn},
     {"BPM From MIDI", &cfgBpmMidi, 0, 1, kOffOn},
     {"Stutter Track", &cfgStutTrack, 0, 3, kStutTrack},
     {"Int Max Gain", &cfgIntMaxGainDb, 0, 24, nullptr},
     {"Ext Max Gain", &cfgExtMaxGainDb, 0, 24, nullptr},
+    {"Out Buffer", &cfgOutBuffer, 0, 4, nullptr},
 };
 constexpr int kConfigN = sizeof(kConfig) / sizeof(kConfig[0]);
 
@@ -139,6 +176,10 @@ int amyPage = 0;
 bool patchPicker = false;  // true while the named patch list (not amyParams) is open
 int patchPickerPage = 0;
 bool chanPicker = false;  // true while the 16 button MIDI channel grid is open
+// True while Audio Out's own confirm screen is open, see
+// drawAudioOutPicker's own comment for why this setting alone gets one.
+bool audioOutPicker = false;
+int audioOutCandidate = 0;  // highlighted, not yet applied until Apply is tapped
 
 int slot = 0;
 int bpm = 120;
@@ -163,6 +204,10 @@ struct Editor {
   bool typing = false;
   int typed = 0;
 } ed;
+// Forward declared: defined further down with the rest of the editor's
+// logic, but the patch picker's number pad shortcut needs to open it
+// earlier in the file than that.
+void openEditor(const char *title, int *v, int lo, int hi, bool tap);
 
 uint32_t tapTimes[4] = {0, 0, 0, 0};
 int tapCount = 0;
@@ -183,6 +228,12 @@ looper::State seenState = looper::EMPTY;
 bool seenOd = false, seenUndo = false;
 
 M5Canvas track(&M5.Display);
+// A narrow sprite covering just the level bar's own 8px width (see
+// drawTrack()'s fillRect), reused the same way track is. Meter only
+// pushes go through this instead of the full kTrackW wide track sprite,
+// see drawMeterOnly()'s comment for why that's the common case worth
+// shrinking.
+M5Canvas meterBar(&M5.Display);
 
 // Mixer geometry: a full height track on the left of each 80 px column, four
 // round buttons stacked to its right, the channel title under the buttons.
@@ -233,6 +284,15 @@ void button(const Rect &r, const char *label, uint16_t fill, uint16_t fg = kWhit
   const int off = (int)(size * 6) + 2;
   text(a, r.x + r.w / 2, r.y + r.h / 2 - off, size, fg, fill);
   text(nl + 1, r.x + r.w / 2, r.y + r.h / 2 + off, size, fg, fill);
+}
+
+// The standard upper left "back one screen / close this box" red X, same
+// spot and size everywhere it appears. The character itself sits 1px
+// right of dead center, same idea as circleButton's own +1,+1 nudge below.
+void backButton() {
+  auto &d = M5.Display;
+  d.fillRoundRect(0, 0, 44, 30, 6, kRed);
+  text("X", 23, 15, 2, kWhite, kRed);
 }
 
 void circleButton(const Rect &r, const char *label, uint16_t fill, uint16_t fg = kWhite, float size = 2) {
@@ -296,11 +356,30 @@ void icon(Icon k, int cx, int cy, int s, uint16_t fg, uint16_t bg) {
       d.fillTriangle(cx - 9, cy - s + 2, cx + 3, cy - s - 6, cx + 3, cy - s + 10, fg);
       break;
     case I_LOOP:
+      // Horizontally flipped (mirrored across the vertical axis through
+      // cx). The arc is intentionally UNCHANGED, not a missed spot: swapping
+      // its two angles (tried last pass, broke it, nearly invisible on
+      // hardware) assumed fillArc always draws the same arc regardless of
+      // argument order, it does not, M5GFX's fill_arc_helper picks a
+      // "reversed" (major) or ordinary (minor) arc from how start/end
+      // compare to each other, not just their values, so swapping silently
+      // switched which one, a ~300 degree ring shrank to a ~60 degree
+      // sliver. Traced it properly this time: this arc's own two angles
+      // sum to 180 mod 360 (300+240=540), which is exactly the condition
+      // for the arc's angle SET to already be its own mirror image across
+      // this axis, confirmed by expanding both angles' covered ranges by
+      // hand. Only the triangle (the arrowhead, not self symmetric) needs
+      // its points actually flipped, negating each one's x offset from cx.
       d.fillArc(cx, cy, 9, 13, 300, 240, fg);
-      d.fillTriangle(cx + 4, cy - 17, cx + 14, cy - 10, cx + 2, cy - 6, fg);
+      d.fillTriangle(cx - 4, cy - 17, cx - 14, cy - 10, cx - 2, cy - 6, fg);
       break;
   }
 }
+
+// The bar's local x-origin within the track sprite, and its width, named
+// once since drawTrack() and drawMeterOnly() both need to agree on exactly
+// where it sits.
+constexpr int kBarX = kTrackW / 2 - 4, kBarW = 8;
 
 void drawTrack(int c) {
   const int lv = (int)(dispLevel[c] * kTrackH);
@@ -308,47 +387,113 @@ void drawTrack(int c) {
   track.fillSprite(kDark);
   if (lv > 0) {
     const uint16_t col = dispLevel[c] > 0.95f ? kRed : (dispLevel[c] > 0.7f ? kYellow : kBrightGreen);
-    track.fillRect(kTrackW / 2 - 4, kTrackH - lv, 8, lv, col);
+    track.fillRect(kBarX, kTrackH - lv, kBarW, lv, col);
   }
-  if (hv > 1) track.fillRect(kTrackW / 2 - 4, kTrackH - hv, 8, 2, kWhite);
+  if (hv > 1) track.fillRect(kBarX, kTrackH - hv, kBarW, 2, kWhite);
   const int cy = kTrackW / 2 + (int)((1.0f - gLevel[c]) * (kTrackH - kTrackW));
   track.fillCircle(kTrackW / 2, cy, kTrackW / 2, gMute[c] ? kGrey : kWhite);
   track.pushSprite(colX(c) + 6, 0);
 }
 
-void drawMixer() {
+// The level bar is the only thing that changes on almost every qualifying
+// tick during normal playback, the fader handle and mute dot only change on
+// a touch. Redrawing and pushing the full kTrackW wide track sprite for a
+// pure level change was pushing 25*240*2 = 12000 bytes over SPI for an 8px
+// wide bar. This pushes just that bar's own width instead, same pixels,
+// roughly a third the bytes, so whatever's occupying the LCD SPI bus at
+// that moment (see spi_lock.h) finishes sooner, and does it far more often
+// than the full-column path since it is the common case, not the rare one.
+// Only valid to use when the fader and mute dot are already correct on
+// screen from the last full drawTrack(), tick() enforces that, but the
+// fader circle's own footprint (radius kTrackW/2, centered on the track's
+// full width) still reaches into this narrow strip whenever it's sitting
+// anywhere near it, so it's redrawn here too, at its unchanged position,
+// same as drawTrack() does, otherwise a meter-only push would paint over
+// and erase whatever part of it falls within this strip.
+void drawMeterOnly(int c) {
+  const int lv = (int)(dispLevel[c] * kTrackH);
+  const int hv = (int)(holdLevel[c] * kTrackH);
+  meterBar.fillSprite(kDark);
+  if (lv > 0) {
+    const uint16_t col = dispLevel[c] > 0.95f ? kRed : (dispLevel[c] > 0.7f ? kYellow : kBrightGreen);
+    meterBar.fillRect(0, kTrackH - lv, kBarW, lv, col);
+  }
+  if (hv > 1) meterBar.fillRect(0, kTrackH - hv, kBarW, 2, kWhite);
+  const int cy = kTrackW / 2 + (int)((1.0f - gLevel[c]) * (kTrackH - kTrackW));
+  meterBar.fillCircle(kTrackW / 2 - kBarX, cy, kTrackW / 2, gMute[c] ? kGrey : kWhite);
+  meterBar.pushSprite(colX(c) + 6 + kBarX, 0);
+}
+
+static const char *kColName[4] = {"INT", "EXT", "LOP", "ALL"};
+// Stutter/chop input target: cfgStutTrack's own stored value is the
+// stutter engine's Looper/Synth/Main/Aux convention (index order this
+// array is keyed by), not a column index. kStutCol[cfgStutTrack] maps
+// that engine value to which of the 4 columns (kColName order) to show
+// as its label. Shared by drawRow3Btn (drawing) and pressMixer (cycling
+// in visual column order on tap), was a local static duplicated in
+// neither place until pressMixer needed it too.
+static const int kStutCol[4] = {2, 0, 3, 1};
+
+void drawMuteBtn(int c) { circleButton(mixBtn(c, 0), "M", gMute[c] ? kRed : kBtn); }
+
+void drawRow1Btn(int c) {
+  if (c < 3) {
+    circleButton(mixBtn(c, 1), "S", gSolo[c] ? kYellow : kBtn, gSolo[c] ? kBg : kWhite);
+  } else {
+    // Main out has no Solo (soloing the final mix is meaningless), that
+    // spot is instead a hollow ring that fills solid red while a master
+    // mix recording to SD is in progress, not yet wired to a real
+    // recorder (see sdRecording's own comment), still correct today, it
+    // has nothing to show, so it stays hollow. The stutter/chop input
+    // toggle that used to live here moved to the LOP column's row 3, see
+    // drawRow3Btn, that spot used to be blank.
+    if (sdRecording)
+      circleButton(mixBtn(c, 1), "", kRed);
+    else
+      circleButtonHollow(mixBtn(c, 1), "", kRed);
+  }
+}
+
+void drawLimiterBtn(int c) {
+  char lim[8];
+  snprintf(lim, sizeof(lim), "%d", -limiterIdx[c]);
+  circleButton(mixBtn(c, 2), lim, limiterIdx[c] ? kBlue : kBtn);
+}
+
+void drawRow3Btn(int c) {
   auto &d = M5.Display;
-  d.fillScreen(kBg);
-  static const char *names[4] = {"INT", "EXT", "LOP", "ALL"};
+  if (c < 2) {
+    const Rect r = mixBtn(c, 3);
+    const uint16_t f = gRecEnable[c] ? kOrange : kBtn;
+    d.fillCircle(r.x + r.w / 2, r.y + r.h / 2, r.w / 2, f);
+    icon(I_LOOP, r.x + r.w / 2, r.y + r.h / 2, 0, kWhite, f);
+  } else if (c == 2) {
+    // Moved here from the Main column's row 1 (see drawRow1Btn), this used
+    // to be the only blank spot in the grid, row 3 of the LOP column, same
+    // row the other two loop record-arm buttons sit in. Hollow so it
+    // still reads differently from the solid buttons around it. Shows
+    // the same 3 letter label as the column it targets, not an unrelated
+    // abbreviation, see kStutCol's own comment.
+    circleButtonHollow(mixBtn(c, 3), kColName[kStutCol[cfgStutTrack]], kOrange, kOrange, 1.5);
+  } else if (c == 3) {
+    circleButton(mixBtn(c, 3), "PMP", compOn ? kOrange : kBtn, kWhite, 1.5);
+  }
+}
+
+void drawTrackLabel(int c) {
   const bool anySolo = gSolo[0] || gSolo[1] || gSolo[2];
+  text(kColName[c], colX(c) + 58, 229, 2, anySolo && c < 3 && !gSolo[c] ? kGrey : kWhite, kBg);
+}
+
+void drawMixer() {
+  M5.Display.fillScreen(kBg);
   for (int c = 0; c < 4; c++) {
     drawTrack(c);
-    circleButton(mixBtn(c, 0), "M", gMute[c] ? kRed : kBtn);
-    if (c < 3) {
-      circleButton(mixBtn(c, 1), "S", gSolo[c] ? kYellow : kBtn, gSolo[c] ? kBg : kWhite);
-    } else {
-      // Main out has no Solo (soloing the final mix is meaningless), that
-      // spot is instead a toggle for which input the stutter grid acts on,
-      // mirroring Config's Stutter Track setting. Hollow so it reads
-      // differently from the solid mute/limiter/rec buttons around it.
-      // Shows the same 3 letter label as the column it targets (kStutTrack
-      // order is Looper, Synth, Main, Aux; those are the LOP, INT, ALL, EXT
-      // columns respectively), not an unrelated abbreviation.
-      static const int kStutCol[4] = {2, 0, 3, 1};
-      circleButtonHollow(mixBtn(c, 1), names[kStutCol[cfgStutTrack]], kOrange, kOrange, 1);
-    }
-    char lim[8];
-    snprintf(lim, sizeof(lim), "%d", -limiterIdx[c]);
-    circleButton(mixBtn(c, 2), lim, limiterIdx[c] ? kBlue : kBtn);
-    if (c < 2) {
-      const Rect r = mixBtn(c, 3);
-      const uint16_t f = gRecEnable[c] ? kOrange : kBtn;
-      d.fillCircle(r.x + r.w / 2, r.y + r.h / 2, r.w / 2, f);
-      icon(I_LOOP, r.x + r.w / 2, r.y + r.h / 2, 0, kWhite, f);
-    } else if (c == 3) {
-      circleButton(mixBtn(c, 3), "PMP", compOn ? kOrange : kBtn, kWhite, 1);
-    }
-    text(names[c], colX(c) + 58, 229, 2, anySolo && c < 3 && !gSolo[c] ? kGrey : kWhite, kBg);
+    drawMuteBtn(c);
+    drawRow1Btn(c);
+    drawLimiterBtn(c);
+    drawRow3Btn(c);
+    drawTrackLabel(c);
   }
 }
 
@@ -361,6 +506,14 @@ void drawAmySummary() {
     char b[24];
     snprintf(b, sizeof(b), "CH %d", amy[i].chan);
     text(b, r.x + 12, r.y + 24, 3, kWhite, kDark, false);
+    // 3 digit patch number, upper right of the box: 0-390 today, will read
+    // 1024+ once Custom/SD patches assign amy[i].patch a real user patch
+    // slot, no special casing needed for that once it lands. text() only
+    // centers or left-aligns, right-aligned by measuring the real width
+    // and placing it from there, same reasoning as truncateToWidth.
+    snprintf(b, sizeof(b), "%03d", amy[i].patch);
+    d.setTextSize(2);
+    text(b, r.x + r.w - 8 - d.textWidth(b), r.y + 14, 2, kGrey, kDark, false);
     if (amy[i].chan == 10) {
       snprintf(b, sizeof(b), "Drums %d", amy[i].patch);
     } else {
@@ -384,7 +537,7 @@ void paramValue(const Param &p, char *out, size_t n) {
 void drawList(const Param *p, int n, const char *title, int page, bool showX) {
   auto &d = M5.Display;
   d.fillScreen(kBg);
-  if (showX) button({0, 0, 44, 30}, "X", kRed, kWhite, 2);
+  if (showX) backButton();
   text(title, showX ? 70 : 8, 15, 2, kWhite, kBg, false);
   const int pages = (n + kRowsPerPage - 1) / kRowsPerPage;
   for (int i = 0; i < kRowsPerPage; i++) {
@@ -416,7 +569,16 @@ void drawList(const Param *p, int n, const char *title, int page, bool showX) {
 // sampler section for that backlog, not dropped, just not built.
 enum PatchCat { CAT_JUNO, CAT_DX7, CAT_DRUM, CAT_CUSTOM, CAT_SD, CAT_COUNT };
 const char *const kPatchCatNames[CAT_COUNT] = {"Juno-6", "DX-7", "Drum Kit", "Custom", "SD Card"};
-const bool kPatchCatEnabled[CAT_COUNT] = {true, true, true, false, false};
+// SD Card loads a folder as a sample_bank::loadDrumKit style kit, which
+// only channel 10 actually plays back (see synth_engine::routeDrumNote,
+// it intercepts channel 10 notes specifically), so it stays disabled
+// elsewhere rather than pretending to work for a synth channel. Custom
+// works for any channel (synth_engine::applyCustomWire just replays the
+// saved wire text, not channel 10 specific).
+bool catEnabled(int c) {
+  if (c == CAT_SD) return amyEdit >= 0 && amy[amyEdit].chan == 10;
+  return true;
+}
 // Curated, not a range: AMY's patch table's real standalone kits are named
 // "MIDI drums ..." / "drum kit N ..." specifically, a handful of Juno/DX7
 // patches also have "drum" in their own descriptive name (Steel Drums,
@@ -450,17 +612,100 @@ int catOf(int patchIdx) {
   return -1;
 }
 
-void drawPatchPicker() {
+// Custom and SD Card aren't a fixed numeric range like the three above,
+// they're whatever's actually on the card right now, listed fresh each
+// time the category is opened rather than cached, a card can be swapped.
+char sdBrowseNames[16][24];
+int sdBrowseCount = 0;
+int sdBrowsePage = 0;
+
+void enterSdBrowse(int cat) {
+  if (cat == CAT_SD)
+    sdBrowseCount = sample_bank::listFolders(LOOPANINI_SD_VOICES_DIR, sdBrowseNames, 16);
+  else
+    sdBrowseCount = sample_bank::listCustomPatches(sdBrowseNames, 16);
+  sdBrowsePage = 0;
+}
+
+void drawSdBrowse() {
   auto &d = M5.Display;
   d.fillScreen(kBg);
-  button({0, 0, 44, 30}, "X", kRed, kWhite, 2);
+  backButton();
+  text(kPatchCatNames[patchCat], 70, 15, 2, kWhite, kBg, false);
+  if (sdBrowseCount == 0) {
+    text("(nothing found on SD)", 160, 120, 2, kGrey, kBg);
+    return;
+  }
+  const int pages = (sdBrowseCount + kRowsPerPage - 1) / kRowsPerPage;
+  for (int i = 0; i < kRowsPerPage; i++) {
+    const int idx = sdBrowsePage * kRowsPerPage + i;
+    if (idx >= sdBrowseCount) break;
+    const Rect r = {4, 34 + i * 41, 278, 38};
+    d.fillRoundRect(r.x, r.y, r.w, r.h, 6, kDark);
+    text(sdBrowseNames[idx], r.x + 8, r.y + 19, 2, kWhite, kDark, false);
+  }
+  button({288, 34, 30, 32}, "", kBtn);
+  triangle(303, 50, 8, true, sdBrowsePage > 0 ? kWhite : kGrey);
+  button({288, 202, 30, 32}, "", kBtn);
+  triangle(303, 218, 8, false, sdBrowsePage < pages - 1 ? kWhite : kGrey);
+  const int segH = 130 / pages;
+  for (int s = 0; s < pages; s++)
+    d.fillRect(288, 68 + s * segH + 1, 30, segH - 2, s == sdBrowsePage ? kBrightGreen : kBtn);
+}
+
+void pressSdBrowse(int x, int y) {
+  if (Rect{0, 0, 44, 30}.hit(x, y)) {
+    patchCat = -1;
+    dirty = true;
+    return;
+  }
+  if (sdBrowseCount == 0) return;
+  const int pages = (sdBrowseCount + kRowsPerPage - 1) / kRowsPerPage;
+  if (Rect{288, 34, 30, 32}.hit(x, y) && sdBrowsePage > 0) sdBrowsePage--, dirty = true;
+  if (Rect{288, 202, 30, 32}.hit(x, y) && sdBrowsePage < pages - 1) sdBrowsePage++, dirty = true;
+  if (x >= 288 && y >= 68 && y < 198) {
+    const int s = (y - 68) / (130 / pages);
+    if (s < pages) sdBrowsePage = s, dirty = true;
+  }
+  for (int i = 0; i < kRowsPerPage; i++) {
+    const int idx = sdBrowsePage * kRowsPerPage + i;
+    if (idx >= sdBrowseCount) break;
+    if (!Rect{4, 34 + i * 41, 278, 38}.hit(x, y)) continue;
+    if (amyEdit >= 0 && patchCat == CAT_SD) {
+      char path[48];
+      snprintf(path, sizeof(path), "%s/%s", LOOPANINI_SD_VOICES_DIR, sdBrowseNames[idx]);
+      synth_engine::loadDrumKit(path);
+    } else if (amyEdit >= 0 && patchCat == CAT_CUSTOM) {
+      // Best effort, not yet confirmed on hardware, see synth_engine.h's
+      // applyCustomWire comment.
+      static char wireBuf[512];
+      if (sample_bank::loadCustomPatch(sdBrowseNames[idx], wireBuf, sizeof(wireBuf)))
+        synth_engine::applyCustomWire(wireBuf);
+    }
+    patchPicker = false;
+    patchCat = -1;
+    dirty = true;
+    return;
+  }
+}
+
+void drawPatchPicker() {
+  if (patchCat == CAT_SD || patchCat == CAT_CUSTOM) return drawSdBrowse();
+  auto &d = M5.Display;
+  d.fillScreen(kBg);
+  backButton();
   if (patchCat < 0) {
     text("PATCH", 70, 15, 2, kWhite, kBg, false);
+    // Quick jump: punch in a patch number directly instead of browsing
+    // categories, opens the same numeric editor every other setting uses.
+    d.fillRoundRect(276, 0, 44, 30, 6, kYellow);
+    for (int row = 0; row < 3; row++)
+      for (int col = 0; col < 3; col++) d.fillCircle(276 + 12 + col * 10, 7 + row * 8, 2, kDark);
     const int curCat = amyEdit >= 0 ? catOf(amy[amyEdit].patch) : -1;
     for (int c = 0; c < CAT_COUNT; c++) {
       const Rect r = {4, 34 + c * 41, 314, 38};
       d.fillRoundRect(r.x, r.y, r.w, r.h, 6, kDark);
-      text(kPatchCatNames[c], r.x + 8, r.y + 19, 2, kPatchCatEnabled[c] ? kWhite : kGrey, kDark,
+      text(kPatchCatNames[c], r.x + 8, r.y + 19, 2, catEnabled(c) ? kWhite : kGrey, kDark,
            false);
       if (c == curCat) {
         const int ax = r.x + r.w - 20, ay = r.y + r.h / 2;
@@ -497,6 +742,7 @@ void drawPatchPicker() {
 }
 
 void pressPatchPicker(int x, int y) {
+  if (patchCat == CAT_SD || patchCat == CAT_CUSTOM) return pressSdBrowse(x, y);
   if (Rect{0, 0, 44, 30}.hit(x, y)) {
     // Back one screen: out of a category's list to the category menu, or
     // out of the category menu to the AMY channel's param list.
@@ -509,14 +755,23 @@ void pressPatchPicker(int x, int y) {
     return;
   }
   if (patchCat < 0) {
+    if (Rect{276, 0, 44, 30}.hit(x, y) && amyEdit >= 0) {
+      openEditor("Patch", &amy[amyEdit].patch, 0, kPatchNameCount - 1, false);
+      return;
+    }
     for (int c = 0; c < CAT_COUNT; c++) {
-      if (!kPatchCatEnabled[c]) continue;
+      if (!catEnabled(c)) continue;
       if (!Rect{4, 34 + c * 41, 314, 38}.hit(x, y)) continue;
       patchCat = c;
+      patchPickerPage = 0;
+      if (c == CAT_SD || c == CAT_CUSTOM) {
+        enterSdBrowse(c);
+        dirty = true;
+        return;
+      }
       // Land on the current patch's page if it is in this category,
       // otherwise start at the top rather than wherever it was left.
       const int cur = amyEdit >= 0 ? amy[amyEdit].patch : -1;
-      patchPickerPage = 0;
       if (catOf(cur) == c) {
         for (int row = 0; row < catCount(c); row++) {
           if (catPatchIndex(c, row) == cur) {
@@ -556,7 +811,7 @@ void pressPatchPicker(int x, int y) {
 void drawChanPicker() {
   auto &d = M5.Display;
   d.fillScreen(kBg);
-  button({0, 0, 44, 30}, "X", kRed, kWhite, 2);
+  backButton();
   text("MIDI CHAN", 70, 15, 2, kWhite, kBg, false);
   const int cur = amyEdit >= 0 ? amy[amyEdit].chan : -1;
   for (int ch = 1; ch <= 16; ch++) {
@@ -583,26 +838,113 @@ void pressChanPicker(int x, int y) {
   }
 }
 
-void drawLooper() {
+// Audio Out is the one Config setting that can never take effect until a
+// reboot (ModuleAudio's I2S is one coupled full duplex peripheral with no
+// clean teardown API, physically shares 3 pins with CoreS3's own internal
+// speaker, see audio_io.h), and hardware testing already caught this
+// biting once: the usual "tap cycles it, applies whenever you next
+// happen to reboot" Config row behavior gives no sign anything is even
+// pending. This is its own confirm screen instead: tapping a row only
+// highlights a candidate, nothing is applied or persisted until Apply is
+// tapped, which reboots immediately so the change is never left
+// invisibly pending, or Cancel, which discards the candidate and leaves
+// the live setting untouched.
+void drawAudioOutPicker() {
   auto &d = M5.Display;
   d.fillScreen(kBg);
-  for (int i = 0; i < 4; i++) {
-    char b[4];
-    snprintf(b, sizeof(b), "%d", i + 1);
-    button({i * 80 + 3, 3, 74, 114}, b, i == slot ? kGreen : kBtn, kWhite, 4);
+  text("AUDIO OUT", 160, 15, 2, kWhite, kBg);
+  for (int i = 0; i < 5; i++) {
+    const Rect r = {4, 34 + i * 32, 312, 28};
+    const bool sel = i == audioOutCandidate;
+    d.fillRoundRect(r.x, r.y, r.w, r.h, 6, sel ? kBlue : kDark);
+    text(kAudioOut[i], r.x + 12, r.y + 14, 2, kWhite, sel ? kBlue : kDark, false);
   }
+  // Explains whatever is currently highlighted, not whatever is currently
+  // active, so it updates live as the candidate changes, before anything
+  // is actually committed.
+  const char *hint = "";
+  switch (audioOutCandidate) {
+    case 0: hint = "No analog output, USB capture only"; break;
+    case 1: hint = "ModuleAudio jack, no USB capture"; break;
+    case 2: hint = "ModuleAudio jack, plus USB capture"; break;
+    case 3: hint = "CoreS3 speaker, silences aux in, no USB"; break;
+    case 4: hint = "CoreS3 speaker, silences aux in, plus USB"; break;
+  }
+  text(hint, 8, 202, 1, kGrey, kBg, false);
+  button({4, 212, 152, 26}, "CANCEL", kBtn, kWhite, 2);
+  const bool changed = audioOutCandidate != cfgAudioOut;
+  button({164, 212, 152, 26}, changed ? "APPLY, REBOOT" : "NO CHANGE", changed ? kGreen : kBtn,
+         kWhite, 1);
+}
+
+void pressAudioOutPicker(int x, int y) {
+  for (int i = 0; i < 5; i++) {
+    if (Rect{4, 34 + i * 32, 312, 28}.hit(x, y)) {
+      audioOutCandidate = i;
+      dirty = true;
+      return;
+    }
+  }
+  if (Rect{4, 212, 152, 26}.hit(x, y)) {
+    audioOutPicker = false;
+    dirty = true;
+    return;
+  }
+  if (Rect{164, 212, 152, 26}.hit(x, y)) {
+    audio_io::setOutputPref(audioOutCandidate);
+    audio_io::muteBeforeReboot();
+    esp_restart();
+  }
+}
+
+void drawSlotBtn(int i) {
+  char b[4];
+  snprintf(b, sizeof(b), "%d", i + 1);
+  button({i * 80 + 3, 3, 74, 114}, b, i == slot ? kGreen : kBtn, kWhite, 4);
+}
+
+constexpr Rect kBpmBoxR = {3, 123, 74, 114};
+constexpr Rect kMeasBoxR = {83, 123, 74, 114};
+// Not a linear range, a musically useful doubling sequence, matching how
+// loop lengths actually get used (1, 2, 4, 8, or 16 bar loops), not every
+// integer in between.
+constexpr int kMeasuresSteps[] = {1, 2, 4, 8, 16};
+constexpr int kMeasuresStepsN = 5;
+
+int measuresStepIndex() {
+  for (int i = 0; i < kMeasuresStepsN; i++)
+    if (kMeasuresSteps[i] == measures) return i;
+  // Not exactly one of the steps (an old persisted value, say), snap to
+  // whichever step is closest rather than getting stuck off the sequence.
+  int best = 0;
+  for (int i = 1; i < kMeasuresStepsN; i++)
+    if (abs(kMeasuresSteps[i] - measures) < abs(kMeasuresSteps[best] - measures)) best = i;
+  return best;
+}
+
+void drawBpmBox() {
   char b[16];
   snprintf(b, sizeof(b), "BPM\n%d", bpm);
-  button({3, 123, 74, 114}, b, kBtn, kWhite, 2);
-  snprintf(b, sizeof(b), "MEAS\n%d", measures);
-  button({83, 123, 74, 114}, b, kBtn, kWhite, 2);
+  button(kBpmBoxR, b, kBtn, kWhite, 2);
+}
 
+void drawMeasBox() {
+  char b[16];
+  snprintf(b, sizeof(b), "MEAS\n%d", measures);
+  button(kMeasBoxR, b, kBtn, kWhite, 2);
+}
+
+void drawBpmMeasBoxes() {
+  drawBpmBox();
+  drawMeasBox();
+}
+
+// Stop button: pause while playing (data exists), square while recording or
+// armed (no data yet), clear when stopped, undo when cleared.
+void drawStopBtn() {
+  auto &d = M5.Display;
   const looper::State ls = looper::state();
   const Rect stopR = {163, 123, 74, 114};
-  const Rect playR = {243, 123, 74, 114};
-
-  // Stop button: pause while playing (data exists), square while recording or
-  // armed (no data yet), clear when stopped, undo when cleared.
   Icon si = I_STOP;
   const char *scap = "STOP";
   uint16_t sfill = kBtn;
@@ -620,7 +962,12 @@ void drawLooper() {
   d.fillRoundRect(stopR.x, stopR.y, stopR.w, stopR.h, 6, sfill);
   icon(si, stopR.x + 37, stopR.y + 44, 20, kWhite, sfill);
   text(scap, stopR.x + 37, stopR.y + 96, 1, kWhite, sfill);
+}
 
+void drawPlayBtn() {
+  auto &d = M5.Display;
+  const looper::State ls = looper::state();
+  const Rect playR = {243, 123, 74, 114};
   Icon pi = I_ARM;
   const char *pcap = "ARM";
   uint16_t pfill = kBtn;
@@ -656,19 +1003,28 @@ void drawLooper() {
   text(pcap, playR.x + 37, playR.y + 96, 1, kWhite, pfill);
 }
 
+void drawLooper() {
+  M5.Display.fillScreen(kBg);
+  for (int i = 0; i < 4; i++) drawSlotBtn(i);
+  drawBpmMeasBoxes();
+  drawStopBtn();
+  drawPlayBtn();
+}
+
+void drawStutterCell(int i) {
+  button({(i % 4) * 80 + 3, (i / 4) * 80 + 3, 74, 74}, kStutNames[i], i == stutHeld ? kOrange : kBtn,
+         kWhite, 2);
+}
+
 void drawStutter() {
-  auto &d = M5.Display;
-  d.fillScreen(kBg);
-  for (int i = 0; i < 12; i++) {
-    button({(i % 4) * 80 + 3, (i / 4) * 80 + 3, 74, 74}, kStutNames[i], i == stutHeld ? kOrange : kBtn,
-           kWhite, 2);
-  }
+  M5.Display.fillScreen(kBg);
+  for (int i = 0; i < 12; i++) drawStutterCell(i);
 }
 
 void drawEditor() {
   auto &d = M5.Display;
   d.fillScreen(kBg);
-  button({0, 0, 44, 30}, "X", kRed, kWhite, 2);
+  backButton();
   text(ed.title, 70, 15, 2, kWhite, kBg, false);
   char b[16];
   snprintf(b, sizeof(b), "%d", *ed.value);
@@ -707,7 +1063,9 @@ void redraw() {
       return drawAmySummary();
     case S_LOOPER: return drawLooper();
     case S_STUTTER: return drawStutter();
-    case S_CONFIG: return drawList(kConfig, kConfigN, "CONFIG", cfgPage, false);
+    case S_CONFIG:
+      if (audioOutPicker) return drawAudioOutPicker();
+      return drawList(kConfig, kConfigN, "CONFIG", cfgPage, false);
     default: break;
   }
 }
@@ -802,29 +1160,100 @@ void pressList(const Param *p, int n, int &page, int x, int y, bool isAmy) {
   }
 }
 
+// Audio Out needs its own confirm screen (drawAudioOutPicker's own
+// comment explains why), opened here instead of the usual tap-cycles-in-
+// place pressList behavior. Found by pointer identity against kConfig,
+// not a hardcoded row index, so this keeps working if kConfig's order
+// ever changes.
+void pressConfig(int x, int y) {
+  if (audioOutPicker) return pressAudioOutPicker(x, y);
+  int idx = -1;
+  for (int i = 0; i < kConfigN; i++)
+    if (kConfig[i].value == &cfgAudioOut) idx = i;
+  if (idx >= 0 && idx / kRowsPerPage == cfgPage &&
+      Rect{4, 34 + (idx % kRowsPerPage) * 41, 278, 38}.hit(x, y)) {
+    audioOutPicker = true;
+    audioOutCandidate = cfgAudioOut;
+    dirty = true;
+    return;
+  }
+  pressList(kConfig, kConfigN, cfgPage, x, y, false);
+}
+
 int dragCol = -1;
 
+// Every button here used to just set dirty, which redraws the whole Mixer
+// screen (4 fader sprites, all 16 circle buttons, all 4 labels) for a
+// single button's color changing. Hardware testing traced pops to exactly
+// this, tapping Lim mid-performance storms the SPI bus for no reason, the
+// audio task doesn't care that a button was tapped, only that the bus was
+// busy. Each branch below now draws only what actually changed instead.
 void pressMixer(int x, int y) {
   for (int c = 0; c < 4; c++) {
-    if (mixBtn(c, 0).hit(x, y)) gMute[c] = !gMute[c], dirty = true;
-    if (c < 3 && mixBtn(c, 1).hit(x, y)) gSolo[c] = !gSolo[c], dirty = true;
-    if (c == 3 && mixBtn(c, 1).hit(x, y)) cfgStutTrack = (cfgStutTrack + 1) % 4, dirty = true;
-    if (mixBtn(c, 2).hit(x, y)) limiterIdx[c] = (limiterIdx[c] + 1) % 7, dirty = true;
+    if (mixBtn(c, 0).hit(x, y)) {
+      gMute[c] = !gMute[c];
+      spi_lock::Guard lock;
+      drawMuteBtn(c);
+    }
+    if (c < 3 && mixBtn(c, 1).hit(x, y)) {
+      gSolo[c] = !gSolo[c];
+      spi_lock::Guard lock;
+      drawRow1Btn(c);
+      // Soloing dims or undims every OTHER column's label too (anySolo),
+      // not just this one's own button, see drawTrackLabel.
+      for (int k = 0; k < 4; k++) drawTrackLabel(k);
+    }
+    // Main column's row 1 is the SD recording indicator now, not tappable,
+    // there is no recorder yet to start or stop, see sdRecording.
+    if (mixBtn(c, 2).hit(x, y)) {
+      limiterIdx[c] = (limiterIdx[c] + 1) % 7;
+      spi_lock::Guard lock;
+      drawLimiterBtn(c);
+    }
     if (mixBtn(c, 3).hit(x, y)) {
       if (c < 2)
         gRecEnable[c] = !gRecEnable[c];
+      else if (c == 2) {
+        // cfgStutTrack's own stored value is the stutter engine's Looper/
+        // Synth/Main/Aux convention (see kStutCol's own comment above,
+        // stutter::set() below expects that, not a column index), a plain
+        // +1 on it cycled the displayed label LOP, INT, ALL, EXT, matching
+        // that raw order instead of the visual column order the user
+        // actually sees them in left to right. This instead advances the
+        // DISPLAYED column by one (INT, EXT, LOP, ALL, wrapping), then
+        // looks up which engine value shows that column, kColToEngine is
+        // kStutCol's inverse (column index -> engine value).
+        static const int kColToEngine[4] = {1, 3, 0, 2};
+        const int curCol = kStutCol[cfgStutTrack];
+        cfgStutTrack = kColToEngine[(curCol + 1) % 4];
+      }
       else if (c == 3)
         compOn = !compOn;
-      dirty = true;
+      spi_lock::Guard lock;
+      drawRow3Btn(c);
     }
   }
 }
 
 void pressLooper(int x, int y) {
-  for (int i = 0; i < 4; i++)
-    if (Rect{i * 80 + 3, 3, 74, 114}.hit(x, y)) slot = i, dirty = true;
-  if (Rect{3, 123, 74, 114}.hit(x, y)) openEditor("BPM", &bpm, 20, 300, true);
-  if (Rect{83, 123, 74, 114}.hit(x, y)) openEditor("Measures", &measures, 1, 8, false);
+  for (int i = 0; i < 4; i++) {
+    if (!Rect{i * 80 + 3, 3, 74, 114}.hit(x, y) || i == slot) continue;
+    const int old = slot;
+    slot = i;
+    spi_lock::Guard lock;
+    drawSlotBtn(old);
+    drawSlotBtn(i);
+  }
+  if (kBpmBoxR.hit(x, y)) openEditor("BPM", &bpm, 20, 300, true);
+  if (kMeasBoxR.hit(x, y)) {
+    // Top half steps up the 1,2,4,8,16 sequence, bottom half steps down,
+    // wrapping both ways, no keypad screen needed for a 5 value set.
+    const int idx = measuresStepIndex();
+    measures = (y < kMeasBoxR.y + kMeasBoxR.h / 2) ? kMeasuresSteps[(idx + 1) % kMeasuresStepsN]
+                                                    : kMeasuresSteps[(idx - 1 + kMeasuresStepsN) % kMeasuresStepsN];
+    spi_lock::Guard lock;
+    drawMeasBox();
+  }
   const looper::State ls = looper::state();
   if (Rect{163, 123, 74, 114}.hit(x, y)) {
     switch (ls) {
@@ -888,9 +1317,13 @@ void onPress(int x, int y) {
       for (int c = 0; c < 4; c++)
         if (trackHit(c).hit(x, y)) dragCol = c;
       break;
-    case S_AMY: pressAmy(x, y); break;
     case S_LOOPER: pressLooper(x, y); break;
-    case S_CONFIG: pressList(kConfig, kConfigN, cfgPage, x, y, false); break;
+    // S_AMY and S_CONFIG are deferred to release, not acted on here: both
+    // page, so a press that turns into a swipe must not also register as
+    // a tap on whatever row happened to be under the finger at the start
+    // of the gesture. See update()'s wasReleased handling.
+    case S_AMY:
+    case S_CONFIG:
     default: break;
   }
 }
@@ -903,7 +1336,47 @@ void whileHeld(int x, int y) {
   }
   if (screen == S_STUTTER && y < kStripY) {
     const int i = (y / 80) * 4 + (x / 80);
-    if (i != stutHeld && i >= 0 && i < 12) stutHeld = i, dirty = true;
+    if (i != stutHeld && i >= 0 && i < 12) {
+      // Was dirty = true, a full fillScreen plus all 12 cells for one cell
+      // changing color, on a screen meant for rapid, expressive taps and
+      // drags, easily the worst offender of this same "whole screen for
+      // one element" pattern the Mixer had, see pressMixer's comment.
+      const int old = stutHeld;
+      stutHeld = i;
+      spi_lock::Guard lock;
+      if (old >= 0) drawStutterCell(old);
+      drawStutterCell(i);
+    }
+  }
+}
+
+// A touch that hasn't moved far from where it started reads as a tap, one
+// that has reads as a swipe/drag instead: S_AMY and S_CONFIG's presses
+// are deferred to release (see onPress) specifically so this can decide
+// between "select this row" and "scroll this list" for the same gesture,
+// rather than always doing the former immediately on press.
+bool wasTap(int x, int y, int bx, int by) { return abs(x - bx) < 12 && abs(y - by) < 12; }
+
+// Vertical drag to change page, same screens/lists the up/down arrows and
+// the segmented index strip already page: Config, and, within the AMY
+// screen, a patch category's list (the category menu and the 4/16 button
+// grids have nothing to page). dy is release y minus press y, negative
+// means dragged upward.
+void trySwipePage(int dy) {
+  if (dy > 40) {
+    if (screen == S_CONFIG) {
+      if (cfgPage > 0) cfgPage--, dirty = true;
+    } else if (screen == S_AMY && patchPicker && patchCat >= 0) {
+      if (patchPickerPage > 0) patchPickerPage--, dirty = true;
+    }
+  } else if (dy < -40) {
+    if (screen == S_CONFIG) {
+      const int pages = (kConfigN + kRowsPerPage - 1) / kRowsPerPage;
+      if (cfgPage < pages - 1) cfgPage++, dirty = true;
+    } else if (screen == S_AMY && patchPicker && patchCat >= 0) {
+      const int pages = (catCount(patchCat) + kRowsPerPage - 1) / kRowsPerPage;
+      if (patchPickerPage < pages - 1) patchPickerPage++, dirty = true;
+    }
   }
 }
 
@@ -959,7 +1432,11 @@ void applyAmy() {
 // writes when something actually changed, so a fader drag or a held mixer
 // screen doesn't hammer flash, and no mutation site can be missed.
 constexpr uint32_t kSettingsMagic = 0x4C4F4F50;  // 'LOOP'
-constexpr uint16_t kSettingsVersion = 1;
+// Bumped 1 -> 2 this pass: cfgSdRecP dropped (dead placeholder, never
+// read by anything), cfgOutBufferP added. A mismatched version is safely
+// ignored by loadSettings (falls back to compiled in defaults) rather
+// than misreading an old blob's bytes under the new layout.
+constexpr uint16_t kSettingsVersion = 2;
 struct PersistedSettings {
   uint32_t magic = kSettingsMagic;
   uint16_t version = kSettingsVersion;
@@ -969,9 +1446,10 @@ struct PersistedSettings {
   bool gRecEnableP[2];
   int limiterIdxP[4];
   bool compOnP;
-  int cfgRecStartP, cfgSigP, cfgAutoOdP, cfgTmP, cfgTmGapP, cfgAudioOutP, cfgSdRecP, cfgBpmMidiP,
+  int cfgRecStartP, cfgSigP, cfgAutoOdP, cfgTmP, cfgTmGapP, cfgAudioOutP, cfgBpmMidiP,
       cfgStutTrackP;
   int cfgIntMaxGainDbP, cfgExtMaxGainDbP;
+  int cfgOutBufferP;
   int amyChanP[4], amyPatchP[4], amyVolP[4], amyVoicesP[4];
   int bpmP, measuresP;
 };
@@ -994,12 +1472,15 @@ PersistedSettings buildSettings() {
   s.cfgAutoOdP = cfgAutoOd;
   s.cfgTmP = cfgTm;
   s.cfgTmGapP = cfgTmGap;
+  // cfgAudioOutP round trips here purely so the memcmp/quiet debounce
+  // below notices and times a change to it like any other setting, it is
+  // never read back by applySettings, see cfgAudioOut's own comment.
   s.cfgAudioOutP = cfgAudioOut;
-  s.cfgSdRecP = cfgSdRec;
   s.cfgBpmMidiP = cfgBpmMidi;
   s.cfgStutTrackP = cfgStutTrack;
   s.cfgIntMaxGainDbP = cfgIntMaxGainDb;
   s.cfgExtMaxGainDbP = cfgExtMaxGainDb;
+  s.cfgOutBufferP = cfgOutBuffer;
   for (int i = 0; i < 4; i++) {
     s.amyChanP[i] = amy[i].chan;
     s.amyPatchP[i] = amy[i].patch;
@@ -1023,12 +1504,13 @@ void applySettings(const PersistedSettings &s) {
   cfgAutoOd = s.cfgAutoOdP;
   cfgTm = s.cfgTmP;
   cfgTmGap = s.cfgTmGapP;
-  cfgAudioOut = s.cfgAudioOutP;
-  cfgSdRec = s.cfgSdRecP;
+  // cfgAudioOut is intentionally NOT restored here, see its own comment,
+  // audio_io::outputPref() is the real source for it, in loadSettings.
   cfgBpmMidi = s.cfgBpmMidiP;
   cfgStutTrack = s.cfgStutTrackP;
   cfgIntMaxGainDb = s.cfgIntMaxGainDbP;
   cfgExtMaxGainDb = s.cfgExtMaxGainDbP;
+  cfgOutBuffer = s.cfgOutBufferP;
   for (int i = 0; i < 4; i++) {
     amy[i].chan = s.amyChanP[i];
     amy[i].patch = s.amyPatchP[i];
@@ -1053,6 +1535,10 @@ void loadSettings() {
   if (got == sizeof(s) && s.magic == kSettingsMagic && s.version == kSettingsVersion) {
     applySettings(s);
   }
+  // cfgAudioOut's real value, audio_io::begin() already read and applied
+  // this same preference itself, long before this function ever runs, see
+  // cfgAudioOut's own comment on why this doesn't go through the blob.
+  cfgAudioOut = audio_io::outputPref();
   // Either way, lastSaved/pendingSaved start as whatever is actually live
   // right now (loaded values, or the compiled in defaults on a first boot
   // / version bump), so the first tick() doesn't immediately re-save a
@@ -1080,12 +1566,21 @@ void maybeSaveSettings(uint32_t now) {
   if (now - pendingSettingsSince < kSettingsQuietMs) return;
   if (memcmp(&pendingSaved, &lastSaved, sizeof(PersistedSettings)) == 0) return;
   prefs.putBytes("settings", &pendingSaved, sizeof(pendingSaved));
+  // cfgAudioOut itself still rides along in the blob, harmlessly inert:
+  // it no longer changes mid session at all now that Audio Out has its
+  // own confirm-and-reboot screen (drawAudioOutPicker/pressAudioOutPicker,
+  // pressConfig routes taps on that row there instead of the usual
+  // tap-cycles-in-place pressList behavior), its only mutation site left
+  // is loadSettings() reading audio_io::outputPref() fresh at boot.
   lastSaved = pendingSaved;
 }
 
 void tick(uint32_t now) {
   if (now - lastTick < 40) return;
   lastTick = now;
+  // Cheap (one int store), no change check needed, live and reboot free
+  // unlike cfgAudioOut, see cfgOutBuffer's own comment.
+  audio_io::setOutBufferBlocks(cfgOutBuffer);
   pushLooperParams();
   applyAmy();
   for (int c = 0; c < 4; c++) {
@@ -1100,22 +1595,36 @@ void tick(uint32_t now) {
     }
   }
 
+  // These three used to set the same blanket dirty flag every other
+  // screen's press handlers did, full redraw of WHATEVER screen happened
+  // to be showing, even though only the Looper screen's 2 transport
+  // buttons ever depend on any of this, the Mixer or Config could be
+  // showing while a background loop's state changes and would still take
+  // the full redraw hit for buttons it doesn't even have. Now only
+  // redraws those 2 buttons, and only when the Looper screen is actually
+  // the one visible.
+  bool transportChanged = false;
   const uint32_t rj = looper::rejectCount();
   if (rj != seenRejects) {
     seenRejects = rj;
     redUntil = now + 600;
-    dirty = true;
+    transportChanged = true;
   }
   if (redUntil && now >= redUntil) {
     redUntil = 0;
-    dirty = true;
+    transportChanged = true;
   }
   const looper::State ls = looper::state();
   if (ls != seenState || looper::overdubbing() != seenOd || looper::undoAvailable() != seenUndo) {
     seenState = ls;
     seenOd = looper::overdubbing();
     seenUndo = looper::undoAvailable();
-    dirty = true;
+    transportChanged = true;
+  }
+  if (transportChanged && !dirty && screen == S_LOOPER && !ed.open) {
+    spi_lock::Guard lock;
+    drawStopBtn();
+    drawPlayBtn();
   }
 
   // The Mixer screen's meters used to redraw and pushSprite() all 4 columns
@@ -1129,17 +1638,33 @@ void tick(uint32_t now) {
   // a VU meter, a real drop from 25) and skips any column whose displayed
   // level hasn't moved enough to look different, rather than pushing a
   // pixel-identical sprite over SPI again.
-  if (!dirty && screen == S_MIXER && !ed.open && now - lastMeterDraw >= 100) {
+  // Widened further after hardware testing: pushing the limiter's ceiling
+  // hard on INT and Main both, past roughly -4dB combined, brought a
+  // little of this same pop/crackle back, most likely because a hard
+  // limited signal's displayed level genuinely swings more from block to
+  // block, crossing the old 0.01 "did it actually move" threshold almost
+  // every tick, which defeats the point of that check right when the
+  // audio side needs it most. 160ms (was 100) and a wider 0.025 threshold
+  // trade a little visual smoothness for meaningfully less SPI traffic
+  // specifically during heavy limiting, a VU meter does not need to be
+  // that precise.
+  // Split from one "did anything move" check into two, so the overwhelming
+  // common case (the level bouncing during playback, fader and mute dot
+  // untouched) goes through drawMeterOnly()'s narrow push instead of
+  // drawTrack()'s full kTrackW wide one. A fader drag or mute tap still
+  // gets the full redraw, its handle moved or its color changed, both
+  // reach further across the column than the bar strip covers.
+  if (!dirty && screen == S_MIXER && !ed.open && now - lastMeterDraw >= 160) {
     lastMeterDraw = now;
     spi_lock::Guard lock;
     for (int c = 0; c < 4; c++) {
-      const bool moved = fabsf(dispLevel[c] - meterSeen[c]) >= 0.01f ||
-                          fabsf(gLevel[c] - faderSeen[c]) >= 0.004f || gMute[c] != muteSeen[c];
-      if (!moved) continue;
+      const bool levelMoved = fabsf(dispLevel[c] - meterSeen[c]) >= 0.025f;
+      const bool faderMoved = fabsf(gLevel[c] - faderSeen[c]) >= 0.004f || gMute[c] != muteSeen[c];
+      if (!levelMoved && !faderMoved) continue;
       meterSeen[c] = dispLevel[c];
       faderSeen[c] = gLevel[c];
       muteSeen[c] = gMute[c];
-      drawTrack(c);
+      if (faderMoved) drawTrack(c); else drawMeterOnly(c);
     }
   }
   maybeSaveSettings(now);
@@ -1153,6 +1678,7 @@ void begin() {
   looper::begin();
   stutter::begin();
   track.createSprite(kTrackW, kTrackH);
+  meterBar.createSprite(kBarW, kTrackH);
   loadSettings();
   dirty = true;
 }
@@ -1182,8 +1708,25 @@ void update() {
         gotoScreen(1);
       else
         gotoScreen(t.base_x < 160 ? -1 : 1);
+    } else if (!ed.open && (screen == S_AMY || screen == S_CONFIG)) {
+      // Deferred from onPress: a tap selects, same as it always did, a
+      // vertical drag scrolls the page instead of also selecting
+      // whatever row it started on.
+      if (wasTap(t.x, t.y, t.base_x, t.base_y)) {
+        if (screen == S_AMY)
+          pressAmy(t.base_x, t.base_y);
+        else
+          pressConfig(t.base_x, t.base_y);
+      } else {
+        trySwipePage(t.y - t.base_y);
+      }
     }
-    if (stutHeld >= 0) stutHeld = -1, dirty = true;
+    if (stutHeld >= 0) {
+      const int old = stutHeld;
+      stutHeld = -1;
+      spi_lock::Guard lock;
+      drawStutterCell(old);
+    }
     dragCol = -1;
   }
   pushStutter();

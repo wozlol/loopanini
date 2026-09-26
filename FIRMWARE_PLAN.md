@@ -1449,7 +1449,874 @@ BPM concept for the looper to sync to). This is genuinely new DSP this
 project has to design, not an AMY parameter to expose, scope it as its
 own real effect (rate as a beat division like the Stutter grid's, depth,
 mode select) when it's taken up, not squeezed in as an afterthought
-alongside the effects menu above.
+alongside the effects menu above. Not to be confused with item 5's Chop
+tab below, Chop is a hard on/off square wave gate tied to the beat
+division grid, this combo effect is a continuous, smoother modulation,
+different DSP, different home (the per channel effects menu, not a
+beat division tab).
+
+**4. Mono Retrig for AMY mono voices.** When an AMY channel's voice count
+(`synth_engine::setVoices`) is 1, holding two notes and releasing the
+newer one should re-sound the older one instead of going silent, a trill
+becomes possible, standard mono synth last-note-priority behavior.
+Researched against arpnmidi's own equivalent (`/Users/woz/Projects/
+arpnmidi`, UI name "Mono Retrig," `drawMonoRetrigScreen`, main .ino around
+line 10743): it is one combined mode there, not a separate legato/retrig
+split, every note change is a full Off then On, there is no pitch-only
+glide variant. Its state is 4 parallel 128 entry tables (held flag,
+velocity, source, a monotonic press order stamp) plus one "currently
+sounding" record. On note-on: mark held, stamp order, if this note is
+already the sounding one just refresh velocity, otherwise Off the
+currently sounding note and On the new one. On note-off: clear that
+note's held flag, if it was the one actually sounding, scan the held
+table for the newest remaining stamp and re-sound that one (the trill),
+or Off if nothing is left held. **Not yet researched on our side**: AMY's
+own C API for sending a note on/off to a specific already-known
+oscillator directly (something like its event struct with an explicit
+osc target), since this needs to intercept note on/off ahead of AMY's own
+`convert_midi_bytes_to_messages()`/`amy_process_single_midi_byte()`
+byte level parsers for any channel in mono mode, across all 3 MIDI
+transports (midi_io.cpp, midi_din.cpp, midi_host.cpp), rather than pass
+raw bytes straight through like today. Looked bite sized at first glance,
+turned out to need this API research first, correctly not guessed at or
+rushed this pass.
+
+**5. Beat Division screen, replaces the Stutter screen.** Same shared
+grid of divisions as today's Stutter screen, but on 4 tabs (Stutter,
+Chop, Arp, Drum Roll) instead of one screen, squished left slightly to
+fit a right side scrollbar that switches between tabs (an unusual
+scrollbar-as-tab-switcher, not a page indicator). Top middle shows the
+current tab's name, top right a gear icon opens that tab's own settings
+screen, a plain parameter list like Config's (`drawList`), not a new
+layout to invent. Chop ("slicer"): a square wave tremolo, on/off gating
+at the chosen division, uses the same input setting as Stutter (the
+Mixer's LOP-column hollow circle, `cfgStutTrack`, moved there this pass,
+see below) rather than a second, separate input toggle. Arp and Drum
+Roll are the two tabs that need real new engines, not just a new grid
+skin, see items 6 and 7.
+
+**6. Arp settings and Thru channel.** Full settings list, sourced from
+arpnmidi's own Arp submenu (main .ino lines 10579-10580, matching its own
+FIRMWARE_3_PLAN.md lines 155-156): Mode, Division, Arp Velocity, Arp
+Length, Octave Range, Retrig, Order, Length, Learn Custom Arp, Clear
+Custom Arp. Retrig here is arpnmidi's own separate setting (Clock Sync
+vs Key Press, whether a fresh key press plants a new phrase origin), not
+to be confused with item 4's Mono Retrig, same word, different feature,
+keep them distinct when this is built. Custom arp capture: starts on the
+first note after Learn is armed, ends at a musical boundary or an
+explicit stop, stores up to 32 events (start, gate, velocity, pitch
+offset) measured from the take's lowest note, remapped live to whatever
+is lowest held at playback. Thru: a second, separate channel setting
+(arpnmidi keeps it as its own peer screen, we can nest it inside Arp
+settings as a second Ch field instead, the concept ports either way) that
+forwards a raw, non-arpeggiated copy of the arp input channel's notes to
+its own output channel, off when set to channel 0. Both Arp and Drum Roll
+get a plain Ch setting on their main settings screen, Drum Roll's
+defaults to channel 10.
+
+**7. Div Map: note/CC learn for Drum Roll, Chop, and Stutter divisions.**
+Called "DIV NOTES" in arpnmidi, not "div map", worth keeping in mind when
+grepping its source later. Its settings screen has one slot per division,
+tap a slot to select it, the very next note or CC number and channel that
+arrives while that slot is selected gets bound to it, no separate
+"listening" flag, capture is simply gated on being on that screen with
+that slot selected. Live, independent of whatever screen is currently
+showing: every incoming note or CC is checked against all bound slots, a
+match sets that slot's held flag and a press order stamp, whichever held
+slot has the newest stamp wins and is read by the mode's scheduler ahead
+of its stored division, snapping back the instant the mapped note/CC
+actually releases (edge triggered on note-off or CC < 64, not a timer).
+**Unconfirmed, check before building**: arpnmidi's own source left it
+unclear this pass whether holding a mapped slot also force-enables Drum
+Roll's master on/off, or only overrides the division while it's already
+on, the user wants the force-enable behavior ("momentarily activate drum
+roll if not activated"), confirm arpnmidi actually does this before
+assuming the porting is 1:1.
+
+**8. A MIDI data looper, separate from the audio looper.** Same tied
+sync behavior as the audio looper's own tracks: each track remembers its
+phase relative to the shared transport, so stopping and restarting keeps
+it aligned to where it was originally recorded rather than zeroing back
+to the start, unless it's a genuinely fresh recording. Sourced from
+arpnmidi's `four_track_looper.cpp`'s `captureTrackPhase()` (line
+228-241): it stores `startOffsetUs = (cycleStartUs - transportStartUs) %
+lengthUs`, how far into its own loop length the track was when the
+shared transport last started. Also from that same source: a per track
+tappable Quant button, a raw microsecond quantize step independent of
+BPM (`recordQuantizeUs_`, four_track_looper.h line 62/141), while BPM
+stays one shared global transport tempo, exactly like the audio looper
+already has it. The audio looper's own BPM display slot is reused to show
+Quant instead when this screen is showing the MIDI looper, not a new
+slot, per channel screen real estate is already tight.
+
+**9. Input/Output source routing (Config screen).** Two new global
+settings: Input Int/Ext (CoreS3's own mic vs ModuleAudio's input jacks)
+and Output Int/Ext (CoreS3's own speaker vs ModuleAudio's headphone jack).
+Confirmed from M5Unified source (`Speaker_Class.hpp`/`Mic_Class.hpp`):
+`M5.Mic.record(int16_t*, len, sample_rate, stereo)` and `M5.Speaker.
+playRaw(int16_t*, len, sample_rate, stereo, repeat, channel,
+stop_current_sound)` are shaped comparably to `audio_io.cpp`'s existing
+`device.record()`/`device.play()` calls into ModuleAudio, both are
+task-based blocking-per-block APIs, encouraging, this may be closer to a
+routing branch inside `readBlock()`/`writeBlock()` than a redesign.
+CoreS3's internal mic/speaker very likely sit on a separate I2S
+peripheral instance from ModuleAudio's (the ESP32-S3 has two), so both
+initializing at once without conflict is plausible, not yet confirmed,
+and switching behavior (can both run simultaneously with only one
+actually read/written per block, or does switching need a teardown/
+reinit of whichever side is inactive) is not yet designed.
+
+**Update 2026-09-25 (nineteenth pass): a number pad shortcut for patch
+picking, swipe to scroll on Config and the patch categories, and a
+standing 1px nudge on every back X.** All in `ui.cpp`:
+- A yellow button, 3x3 dot grid icon, sits upper right on the patch
+  category menu (mirrors the upper left X). Opens the same numeric editor
+  every other setting uses (`openEditor("Patch", &amy[amyEdit].patch, 0,
+  kPatchNameCount - 1, false)`), so a specific patch number can be typed
+  directly instead of drilling through categories. Needed a forward
+  declaration of `openEditor` (defined much further down with the rest of
+  the editor's own logic) since this is the first thing to call it from
+  earlier in the file.
+- **Swipe to scroll**, on Config and a patch category's list (the only
+  two screens with real pages, the category menu and the 4/16 button
+  grids have none). This needed onPress itself restructured, not just an
+  addition: S_AMY and S_CONFIG's presses used to act immediately, which
+  would have meant a swipe starting on top of a row also selected that
+  row on the way through. Both are now deferred to release, where
+  `wasTap()` (moved less than 12px) decides between a normal row tap
+  (`pressAmy`/`pressList`, same as before, now called with the release's
+  base position) and `trySwipePage()` (moved more than 40px vertically,
+  changes the page instead). Every other screen (Mixer, Looper) still
+  acts on press, unaffected, dragging a fader or holding a stutter pad
+  needs that immediacy and has nothing to page.
+- Every upper left red X (Config, the AMY channel view, both pickers) now
+  goes through one shared `backButton()` instead of a separate `button()`
+  call each place, character nudged 1px right of center, standard
+  everywhere it appears, same idea as `circleButton()`'s own existing
+  +1,+1 nudge.
+
+Not yet confirmed on hardware.
+
+**Update 2026-09-25 (twentieth pass): SD Card and Custom actually do
+something now, researched against AMY's own documented conventions
+first, not invented.** Research before writing anything, per the user's
+own instruction not to reinvent a format:
+- **AMY's "patch file format" is just its own wire protocol text.**
+  `patches.h`'s baked in patches (`"v1w4a1,,0,1Zv0w20c2L1G4Z..."`) are the
+  format, there is no separate binary/JSON patch file convention to be
+  compatible with. Confirmed in `docs/midi.md`'s SYSEX section: AMY
+  receives wire messages over SYSEX directly, no encoding, prefaced with
+  its own manufacturer ID `00 03 45` inside standard `F0 ... F7` framing.
+  This is almost certainly how "the AMYboard editor sending on ch1"
+  actually delivers a patch.
+- **User patch numbering is already a documented AMY convention**, not
+  something to invent: `docs/synth.md`'s "User patches" section fixes it
+  at 1024-1055 (32 slots, `amy_default_config`'s `max_memory_patches`),
+  built by repeating `amy.send(patch=SLOT, osc=N, ...)` for each
+  oscillator-describing command. `LOOPANINI_USER_PATCH_BASE`/`_COUNT`
+  added to `config.h` matching this exactly. Also cross-confirms this
+  project's own hand curated Drum Kit category from the nineteenth pass:
+  `docs/api.md`'s `patch_number` row spells out "256 piano, 258 legacy GM
+  drums, 384-390 Gamma9001 GM drum kits" as the official ranges, exactly
+  `kDrumKitPatches`.
+
+Built:
+- **SD Card** browses `LOOPANINI_SD_VOICES_DIR` (`/Samples`, a subfolder
+  specifically so `/Custom` doesn't also show up as a bogus kit, the
+  user's own suggested fix), `sample_bank::listFolders()` (new), tapping
+  one calls the existing `synth_engine::loadDrumKit()` on it. Only
+  enabled when editing channel 10: that is the only channel `synth_engine
+  ::routeDrumNote()` actually intercepts samples for, enabling it
+  elsewhere would look like it worked and do nothing. Generalizing kit
+  playback to channels 1-3 is the real next step for this category, not
+  done here.
+- **Custom**: capture, save, and browse all work, applying a loaded one
+  is the piece still marked best effort. `midi_io.cpp`'s USB device MIDI
+  path now accumulates SYSEX across USB-MIDI's own multi packet framing
+  (Code Index Number 4-7), and on a complete message carrying AMY's `00
+  03 45` prefix, saves the wire text as `/Custom/patchNNN.txt`
+  (`sample_bank::saveCustomPatch()`, numbered placeholder, not hidden,
+  the user can rename it from a computer). The Custom category lists
+  those files (`sample_bank::listCustomPatches()`) and, on tap, reads one
+  back (`loadCustomPatch()`) and replays it through `synth_engine::
+  applyCustomWire()`, which is a direct, one line call to AMY's own
+  `amy_send_wire_from_sysex()`, the same entry point a live incoming
+  SYSEX patch goes through. **What's unverified**: whether replaying the
+  raw captured text this way is sufficient on its own, or whether it
+  needs to be wrapped as a proper registered user patch first (`patch=
+  SLOT` on each command, per the User patches section above) to reliably
+  land on the right synth/channel rather than whatever `v0`/`v1`/etc in
+  the text happens to resolve against live. Only USB device MIDI captures
+  SYSEX right now, not USB host or DIN, matching that a web editor most
+  plausibly connects as this board's USB device (computer side), not
+  through Module USB host or DIN; extending capture to those two is
+  possible later if needed, DIN especially is a bigger lift, no flow
+  control at 31250 baud for a large dump.
+- Each of the AMY screen's 4 boxes shows its channel's 3 digit patch
+  number, upper right, measured/positioned the same right-align-by-
+  measuring approach `truncateToWidth` already uses, `text()` itself only
+  centers or left-aligns. Reads 1024+ automatically once a Custom patch
+  actually lands in the user patch range, no special casing needed for
+  that, it is already just `amy[i].patch`.
+
+Not yet confirmed on hardware, especially the Custom apply step flagged
+above, that is the one piece of this pass built on inference about AMY's
+event semantics rather than something read directly and confidently from
+source, say so plainly if it does not work as hoped on the first try.
+
+**Update 2026-09-25 (twenty first pass): the overload failsafe wired up
+in the ninth pass was a severe regression, found with certainty and
+fixed.** Hardware report: AMY made sound for "a few notes" right after
+boot, then MIDI stopped reaching it entirely, on USB host and USB device
+both, while the UI stayed fully responsive. Traced to source rather than
+guessed, since this exact combination (both transports dead, UI fine)
+pointed at shared AMY-side state, not a transport bug: `amy_overload_
+failsafe()` (amy.c) calls `amy_reset_oscs()`, which runs `instruments_
+reset()` and `pcm_unload_all_presets()`. That does far more than its own
+"silence and reset" framing suggests, in api.c's own comment right above
+it, it permanently wipes every channel's synth assignment (`default_
+synths`, set up once at `amy_start()`, nothing in this project recreates
+it after) and every SD loaded sample, the instant it fires once. The
+"few notes" was its own descending "doot doot doot doot" arpeggio playing
+as it fired, not real MIDI activity, and after that there were no synths
+left on any channel for MIDI to reach, matching the report exactly.
+
+Fixed with a one line, source confirmed change: `synth_engine::begin()`
+now sets `amy_config.overload_threshold = 0`. Confirmed from `amy_
+overload_check()`'s own code this disables only the destructive branch
+(the threshold gate is checked after the smoothed load value already
+updated), `amy_get_render_load()` reads that same smoothed value
+directly and is confirmed independent of the threshold, so the render
+load line this project's debug output depends on is unaffected, only the
+`instruments_reset()`/`pcm_unload_all_presets()` action is disabled. The
+hook (`onOverload`, eighth pass) is left registered but now unreachable,
+kept as a documented, ready-made hand-hold for a safer failsafe design
+later (mute output briefly, say, rather than wipe every instrument) if
+one is ever wanted, not deleted.
+
+Confirmed on hardware: not yet, please retest MIDI on both transports.
+
+**Update 2026-09-25 (twenty second pass): a version string on the boot
+splash, and the upload log itself turned out to be worth reading.** The
+retest's own upload log showed `loopanini.ino.bin` (the actual firmware,
+not just the bootloader/partition table) hit esptool's "No changed
+sectors found, verifying if data is in flash" path, meaning that specific
+upload may have written nothing new to the chip at all, esptool's own
+speed optimization for "this content already matches flash." Ambiguous on
+its own (could mean a stale build, or could just mean an earlier upload
+already carried the fix and this one had nothing left to change), but not
+something to guess past when the user directly asked for a way to make
+this visible. `config.h`'s new `LOOPANINI_VERSION` ("v0.1.1") now prints
+on the boot splash, right before "starting...", bump it every pass from
+here whenever a change goes out for testing. Also cleared this project's
+specific Arduino build cache directory (`~/Library/Caches/arduino/
+sketches/...`, the exact one the log named) to remove any doubt for the
+retest, that is pure compiler output, safe and normal to clear, Arduino
+regenerates it fully on the next compile.
+
+**Update 2026-09-25 (twenty third pass): the real cause of "AMY dies at
+boot", a debug log filter, and one more meter SPI reduction.** The actual
+bug, found on hardware, not in any of this project's own code changes: a
+channel's MIDI Chan had been changed (most likely while trying the
+nineteenth pass's new channel picker) and, since the twentieth pass added
+settings persistence, that saved and reloaded on every boot from then on.
+Notes arrived and parsed correctly on both transports the whole time
+(confirmed from real hardware logs, ruling out a transport bug directly
+rather than assuming one), nothing was listening on the channel they
+were actually sent on. The overload failsafe fix (twenty first pass) was
+real and correct but was never the (sole) cause here, worth remembering
+that two things can be broken at once. Fixed on hardware by correcting
+the channel, no code change needed, the lesson for next time either of
+"AMY makes no sound" recurs: check MIDI Chan on the AMY screen first,
+it is right there, large, on every channel's box already.
+
+Also: `midi_host.cpp`/`midi_io.cpp`/`midi_din.cpp` no longer print real
+time bytes (0xF8-0xFF: clock, active sensing, ...) to the debug log, some
+controllers send clock continuously and it was flooding the log
+unreadable, this only affects what gets printed, not processing or
+timing. And the Mixer meter SPI throttle (twelfth pass) widened further:
+hardware testing found a little pop/crackle still came back specifically
+when pushing the limiter hard on INT and Main together, most likely
+because a heavily limited signal's displayed level genuinely swings more
+block to block, crossing the old 0.01 "did it move" threshold almost
+every 100ms tick. Now 160ms / 0.025, trading a little meter smoothness
+for less SPI traffic specifically in that scenario. `LOOPANINI_VERSION`
+bumped to v0.1.2 for this pass (v0.1.1 shipped a code change, the debug
+filter, without bumping the version, a miss worth naming so it does not
+happen again).
+
+Not yet confirmed on hardware whether the meter throttle change actually
+clears the last bit of pop/crackle under heavy limiting.
+
+**Update 2026-09-25 (twenty fourth pass): looked at making VU draw
+genuinely unable to interfere with audio, beyond the throttle alone.**
+Traced the real mechanism instead of guessing at FreeRTOS priority tuning.
+Confirmed from source: Arduino's `loop()` task (where all UI drawing,
+including the Mixer meter, runs) is created at priority 1
+(`cores/esp32/main.cpp`), well below the audio task's priority 5
+(`LOOPANINI_AUDIO_TASK_CORE`/`_PRIORITY`, config.h), and the audio task is
+explicitly pinned to core 0. `m5stack_cores3`'s boards.txt does not
+hardcode a default core for `loop()` itself, though it does expose a
+LoopCore menu choice, so which physical core UI drawing actually lands on
+was not something to assume, a one line `xPortGetCoreID()` print was added
+right after setup()'s existing reset reason line instead (see
+loopanini.ino) so this is confirmed from the boot log every time, not
+assumed once and forgotten.
+
+Also confirmed, tracing M5GFX's actual SPI bus code
+(`Bus_SPI.cpp`/`Panel_LCD.cpp`): every `pushSprite()` already goes over
+hardware DMA, and every `pushSprite()` also busy spins the calling core
+(`while (*spi_cmd_reg & SPI_USR);`, no yield) until that same transfer
+finishes, inside the same call, with no exposed way to kick a transfer off
+and come back for it later without holding the shared `spi_lock` mutex
+(also used by Module USB) open across ticks, which would trade this
+problem for a worse one. So "switch it to DMA" was not the real lever, it
+already is, and there is no clean async option here without a much bigger,
+riskier restructure. Dropped that specific idea rather than ship something
+that only sounds like a fix.
+
+What actually shipped: `drawTrack()`'s meter push used to redraw and push
+the full `kTrackW` (25px) wide column sprite for every qualifying change,
+including the by far most common one, the level bar moving with no fader
+or mute change. Split into `drawTrack()` (unchanged, full column, used
+whenever the fader or mute dot actually changed) and a new
+`drawMeterOnly()` (a separate, narrow 8px wide sprite covering just the
+bar's own width, reused across all 4 columns the same way `track` already
+is). `tick()` now checks level movement and fader or mute movement
+separately and picks whichever draw the change actually needs. The fader
+handle's circle footprint still reaches into that narrow strip whenever
+it's sitting anywhere near it (it spans the track's full width), so
+`drawMeterOnly()` redraws it too, at its unchanged position, same as
+`drawTrack()` does, otherwise the meter only path would silently erase
+part of it, caught before shipping by tracing the actual pixel geometry
+rather than assuming an 8px wide push was automatically safe. Net effect:
+the common per tick case now pushes roughly a third the bytes over SPI it
+used to, on top of the existing 160ms/0.025 throttle (twenty third pass),
+so whatever else wants the bus at that moment finishes sooner.
+
+Not yet confirmed on hardware whether this narrows the heavy limiting
+pop/crackle further. `LOOPANINI_VERSION` bumped to v0.1.3.
+
+**Update 2026-09-25 (twenty fifth pass): USB hub support, a Mixer
+rearrangement, and a big backlog addition researched against arpnmidi.**
+Landed:
+- **USB hub support was missing, now added.** The vendored USB Host
+  Shield 2.0 library (`src/USB_Host_Shield_Library_2.0/usbhub.h`/`.cpp`)
+  already has a hub driver, but `midi_host.cpp` never instantiated one,
+  only `USB` and `USBH_MIDI`. `USB::Task()` walks every registered device
+  class driver each call, so a hub plugged into Module USB would enumerate
+  itself (or fail) but nothing would ever poll its downstream ports,
+  whatever was plugged into the hub would never be seen. Fixed with a
+  3 line addition (`USBHub *hub = nullptr;` and `hub = new USBHub(usb);`
+  in `begin()`, same pattern already used for `midi`), `USB_NUMDEVICES` is
+  16, plenty of headroom, no other change needed. Not yet confirmed on
+  hardware, needs an actual hub plugged in to test.
+- **Mixer rearrangement.** The stutter/chop input selector (the hollow
+  ring cycling through `cfgStutTrack`) moved from the Main column's row 1
+  to the LOP column's row 3, previously the only blank spot in the grid,
+  the same row the other two loop record-arm buttons sit in. The spot it
+  vacated, Main's row 1, is now a hollow red ring that will fill solid
+  red while a master mix recording to SD is in progress (`sdRecording` in
+  ui.cpp), not wired to a real recorder yet, that's item 1's SD work,
+  still not attempted, so it stays hollow today, honestly, not faked.
+
+Also confirmed already fully captured, no change needed: the open
+research question on whether AMY/Tulip has a standard on-disk patch file
+format (item 1 above) was already written down accurately, re-read it and
+left it as is.
+
+The rest of this pass was research, not code, folded directly into items
+4 through 9 of the backlog above (Mono Retrig, the Beat Division screen,
+Arp settings and Thru, Div Map/DIV NOTES, the MIDI looper, and Input/
+Output source routing), each one sourced against arpnmidi's actual code
+this time rather than working from the user's description alone, per
+their own standing instruction to look real things up before designing
+around them. `LOOPANINI_VERSION` bumped to v0.1.4.
+
+**Update 2026-09-25 (twenty sixth pass): Mixer and Stutter buttons no
+longer redraw the whole screen.** Both screens set a single blanket
+`dirty` flag on every button tap, which redraws everything (Mixer:
+`fillScreen` plus all 4 fader sprites, all 16 circle buttons, all 4
+labels; Stutter: `fillScreen` plus all 12 cells) for one button's color
+changing, exactly the same class of unnecessary SPI traffic the meter
+throttle (twelfth and twenty third passes) and the meter-only narrow push
+(twenty fourth pass) already went after, just on the press path instead
+of the periodic tick. User caught it directly: tapping a Lim button mid
+performance pops, and the Stutter grid, meant for rapid expressive taps
+and drags, was the worst offender.
+
+`drawMixer()`'s per row drawing split into standalone functions
+(`drawMuteBtn`, `drawRow1Btn`, `drawLimiterBtn`, `drawRow3Btn`,
+`drawTrackLabel`), `drawMixer()` itself now just calls all of them per
+column, so there is exactly one place each button's drawing logic lives.
+`pressMixer()` calls only the one (or, for Solo, since `anySolo` dims
+every other column's label too, one button plus all 4 labels) needed for
+whatever it just changed, wrapped in its own `spi_lock::Guard`, no more
+`dirty = true` anywhere in it. Same split for Stutter: `drawStutterCell(i)`
+factored out, `whileHeld()`'s drag-across-cells handling and `update()`'s
+release handler each redraw only the cell(s) that actually changed state
+(old cell back to normal, new cell to orange), not the full 12. Screen
+entry/navigation still goes through the normal `dirty` to `redraw()` full
+paint, correctly, that genuinely needs everything drawn once.
+
+Not yet confirmed on hardware. Also noted, not yet investigated: user
+reports pops still occasionally happen within 6 voices with simple, light
+effects, slightly worse specifically over USB host MIDI, separate from
+this pass's fix, still open. `LOOPANINI_VERSION` bumped to v0.1.5.
+
+Two small follow up fixes on the same screen, same pass: the stutter/chop
+input selector (LOP column's row 3) cycled its displayed label in
+`cfgStutTrack`'s own raw storage order (LOP, INT, ALL, EXT) rather than
+the visual column order the user actually sees left to right, tapping now
+advances the displayed column (INT, EXT, LOP, ALL, wrapping) and looks up
+which stored value shows that column, `cfgStutTrack` itself still stores
+the stutter engine's own Looper/Synth/Main/Aux convention unchanged, only
+the tap-to-tap cycling order changed, see `kColToEngine` in `pressMixer`.
+Also, that button's and PMP's label text were both undersized (1 instead
+of the normal 2) to fit their 3 letter labels, bumped to 1.5, in between
+rather than all the way to 2, still worth a look on real hardware to
+confirm it actually fits now. `LOOPANINI_VERSION` bumped to v0.1.6.
+
+**Update 2026-09-25 (twenty seventh pass): CoreS3's own speaker, wired for
+real into Audio Out, an output buffer setting, and a dead placeholder
+removed.** User decided against ever using CoreS3's own internal mic
+("i dont need the mic... so we dont get feedback ever"), which drops the
+whole input side GPIO conflict and the Mic_Class async bridging this was
+originally scoped with, real simplification. What shipped instead:
+
+- **Audio Out (Config) is 5 options now and actually wired up**: USB, Ext,
+  Ext+USB, Int, Int+USB (Ext not Aux, to match the Mixer screen's own EXT
+  column naming for the same physical path; Both renamed to Ext+USB first,
+  ambiguous once there were two kinds of "both"; both catches were the
+  user's, not caught here first), was 3 options
+  (`kAudioOut`) that nothing in the
+  codebase ever read, a placeholder exactly like SD Record below. `audio_io.h`'s
+  `AnalogOut` (None/Module/Internal) and a bool for whether USB is on are
+  both decided once, in `audio_io::begin()`, from a preference persisted
+  in its own dedicated NVS key (namespace `loopaudio`, not ui.cpp's
+  settings blob), because `begin()` runs before `ui::begin()` and that
+  blob's load. `cfgAudioOut` in ui.cpp is a display/edit mirror only, its
+  own comment explains why `applySettings` deliberately does not restore
+  it, `loadSettings` pulls the real value from `audio_io::outputPref()`
+  instead, and `maybeSaveSettings` calls `audio_io::setOutputPref()`
+  alongside its existing quiet debounce write, piggybacking on that
+  existing timing rather than a second one. Boot time only, confirmed no
+  clean way around that this pass: ModuleAudio's I2S is one coupled full
+  duplex peripheral (`I2S_MODE_TX | I2S_MODE_RX` in one
+  `i2s_driver_install()`, `M5Module_Audio.cpp:406`), and it physically
+  shares 3 of its 5 pins with CoreS3's own internal speaker (GPIO0, 13, 14,
+  confirmed against both `audio_io.cpp`'s own pin claims and M5Unified's
+  CoreS3 board case), so Aux and Int can never both be live. Choosing Int
+  or Int+USB silences ModuleAudio's aux input jack too, not just its
+  output, same coupled peripheral, no way to leave one side off. USB
+  itself is a fully separate subsystem (TinyUSB), no such restriction,
+  `loopanini.ino`'s `usb_audio_out::writeBlock()` call is now gated on
+  `audio_io::usbAudioEnabled()` so picking Aux or Int alone actually turns
+  it off rather than leaving it silently running regardless, which is
+  what it did before this pass.
+
+- **CoreS3's internal speaker path is real, not a stub.** `M5.Speaker.
+  playRaw()` queues a request to its own background task and returns
+  immediately, confirmed from `Speaker_Class.hpp`'s own doc comments,
+  unlike ModuleAudio's `device.play()` which only returns once the data
+  is actually copied out. Reusing one buffer the instant `playRaw()`
+  returns would race that background task still reading it, so this uses
+  two buffers, alternated, each reused only once `setBufferReleaseCallback`
+  confirms the task is actually done with that specific pointer, exactly
+  the pattern the library's own docs recommend. Not yet confirmed on real
+  hardware, this pass was implementation, not a bench test.
+
+- **Out Buffer (Config), 0-4 blocks of deliberate slack between render/mix
+  and the actual hardware write.** Reasoned through with the user first:
+  today there is zero buffering in that chain, a straight render, mix,
+  write sequence every block, so an occasional slow render (heavy
+  polyphony, patch 0 at 6 voices, already known to sometimes exceed one
+  block's time budget) has nothing to absorb it. `audio_io::writeBlock()`
+  now queues incoming blocks into a small ring and only starts actually
+  writing to hardware once the configured depth is banked, so a rare slow
+  render draws down that reserve instead of directly starving the output,
+  at the cost of depth blocks of fixed added latency (0, the default,
+  is today's exact direct write behavior). Pure software queue, no
+  peripheral involved, so unlike Audio Out this applies live,
+  `ui.cpp`'s `tick()` just calls `audio_io::setOutBufferBlocks(cfgOutBuffer)`
+  every tick, cheap enough not to need its own change check. This helps an
+  occasional slow block, it will not help a sustained overload the whole
+  time a patch is playing, that needs less render cost or fewer voices,
+  buffering only relocates when a backlog would show up, it cannot create
+  more CPU time. Separately, not yet investigated: pops specifically worse
+  over USB host MIDI are suspected to be `midi_host::poll()` (runs on the
+  audio task, takes the same `spi_lock` the LCD uses, confirmed busy-spin
+  wait, no timeout) contending with a big LCD SPI push at the wrong
+  moment, a different mechanism this buffer would not address either,
+  still open.
+
+- **SD Record (Config) removed.** Confirmed dead, like Audio Out was:
+  declared, shown, persisted, never once read by anything that would
+  actually record to SD. `PersistedSettings`' `kSettingsVersion` bumped
+  1 -> 2 for this pass (SD Record's field dropped, Out Buffer's added),
+  which means, expected and correct, not a bug: the very first boot after
+  this update ignores the old saved blob entirely (version mismatch) and
+  starts every setting fresh at its compiled in default, exactly once.
+
+`LOOPANINI_VERSION` bumped to v0.1.7, then v0.1.8 for the Both -> Ext+USB
+rename (Aux -> Ext, requested right after, rides along in the same
+v0.1.8, not its own bump).
+
+**Update 2026-09-25 (twenty eighth pass): the Looper screen redraw fix,
+a real Audio Out persistence bug found on hardware, an icon flip, and a
+USB audio question answered.** User caught the Looper screen still doing
+the same whole screen redraw thing the Mixer and Stutter passes had
+already fixed.
+
+- **Looper screen.** Split the same way Mixer's row functions were:
+  `drawSlotBtn(i)`, `drawBpmMeasBoxes()`, `drawStopBtn()`, `drawPlayBtn()`,
+  `drawLooper()` itself just calls all of them once. Slot selection
+  (`pressLooper`) now redraws only the old and new slot box instead of
+  setting the blanket `dirty` flag. More interesting: 3 separate checks in
+  `tick()` (a reject flash, its timeout, and the looper state/overdub/undo
+  poll) were ALSO setting that same blanket flag, meaning a background
+  loop's state changing while looking at the Mixer or Config screen would
+  fully redraw whatever screen was actually showing, not the Looper
+  screen the change was even about, real waste on top of the redundant
+  kind already fixed. Now tracked as one `transportChanged` bool and only
+  acted on, redrawing just `drawStopBtn()`/`drawPlayBtn()`, when the
+  Looper screen is actually the one visible and no editor is open over
+  it, same guard shape as the Mixer meter tick.
+
+- **Audio Out setting did nothing on hardware, a real bug, not user
+  error.** Its actual persistence (`audio_io::setOutputPref`, since
+  `audio_io::begin()` needs the value before ui.cpp's own settings blob
+  even loads) was piggybacked on `maybeSaveSettings`'s 5 second quiet
+  debounce last pass, for simplicity. That debounce exists to stop an NVS
+  write landing mid gesture on a continuously moving value like a fader,
+  but Audio Out is a single discrete tap, there is no gesture to wait
+  out, and the only way this setting ever takes effect is a reboot, the
+  natural test is change it, reboot immediately, which loses the change
+  if done inside that 5s window, exactly what happened. Fixed with a
+  small dedicated `pushAudioOutPref()`, called every `tick()`, pushing the
+  instant `cfgAudioOut` actually differs from what was last pushed, no
+  debounce. `maybeSaveSettings` still carries `cfgAudioOutP` in the blob
+  purely so its memcmp notices a change happened at all, it no longer
+  persists it.
+
+- **The looper record-arm circle's icon (I_LOOP, both the INT and EXT
+  columns share this one shared `icon()` case) flipped horizontally**,
+  per direct request. An arc's horizontal flip is its two angles swapped
+  (true whenever they sum to 180 mod 360, confirmed true for this icon's
+  300/240 pair), a shape's flip negates each point's x offset from center,
+  y unchanged.
+
+- **USB audio device question, answered, not a bug.** `usb_audio_out` is
+  real and complete (`USBAudioCard(..., UAC_SPK_NONE, UAC_MIC_STEREO)`,
+  `usb_audio_out.h`'s own comment: "output-only (device to host)... no
+  USB playback path exists"), and unaffected by this session's Audio Out
+  work, `usb_audio_out::begin()` (the enumeration call) was never gated,
+  only `writeBlock()` (whether samples actually flow) was. Loopanini
+  shows up as a CAPTURE/microphone source on the host, by design, not
+  as an output or speaker choice, that's where to look for it.
+
+Looper and Audio Out fixes not yet confirmed on hardware.
+`LOOPANINI_VERSION` bumped to v0.1.9.
+
+**Update 2026-09-25 (twenty ninth pass): Audio Out gets its own confirm
+and reboot screen, USB naming looked into.** User asked directly: does it
+really need a reboot? Confirmed yes, unchanged from the twenty seventh
+pass's finding (ModuleAudio's coupled full duplex I2S, 3 shared pins with
+CoreS3's internal speaker, no clean teardown API either side), then
+proposed the actual fix for the confusing part: a dedicated screen,
+select a candidate, Apply reboots immediately, Cancel discards, rather
+than the previous pass's tap-cycles-in-place-and-silently-applies-
+whenever-you-next-reboot behavior that caused the persistence bug found
+last pass in the first place.
+
+Built as `drawAudioOutPicker()`/`pressAudioOutPicker()`, opened by
+`pressConfig()` (new, replaces the direct `pressList(kConfig, ...)` call
+in `update()`) intercepting a tap on the Audio Out row specifically,
+found by pointer identity against `kConfig` (`kConfig[i].value ==
+&cfgAudioOut`), not a hardcoded row index, stays correct if `kConfig`'s
+order ever changes. 5 selectable rows, a hint line explaining whatever is
+currently highlighted (not whatever is currently active) so it updates
+live while choosing, CANCEL and APPLY, REBOOT as two large buttons rather
+than reusing the small back X every other picker in this codebase uses,
+per the user's own request for something that unambiguous given the
+consequence. Apply calls `audio_io::setOutputPref()` then `esp_restart()`
+directly, no round trip through `cfgAudioOut` or the settings blob at
+all. This makes last pass's `pushAudioOutPref()`/`lastPushedAudioOut`
+dead code, since nothing changes `cfgAudioOut` mid session anymore,
+removed rather than left behind, `cfgAudioOut` is now purely
+loadSettings()-populated-at-boot, display only.
+
+USB device naming: asked whether "TinyUSB UAC1" (what `usb_audio_out`
+shows up as) could become something custom, e.g. "WOZ.LOL". Traced to
+`tinyusb_add_string_descriptor("TinyUSB UAC1")` in `USBAudioCard.cpp`,
+confirmed a hardcoded literal, no constructor parameter or setter exists
+for it. Important distinction from `USB_Host_Shield_Library_2.0` (this
+project's own vendored, patchable copy under `src/`): `USBAudioCard` is
+part of the ESP32 Arduino core's own bundled libraries, installed
+globally under Arduino15's package folder, outside this project and its
+git history entirely. Patching it would mean editing a file this project
+doesn't own, invisible to version control, silently reverted by any
+future core update, affecting every other sketch on this machine, not
+just Loopanini. Not done, disproportionate for a cosmetic string, matches
+the user's own "if not, whatever."
+
+Not yet confirmed on hardware. `LOOPANINI_VERSION` bumped to v0.1.10.
+
+**Update 2026-09-26 (thirtieth pass): Measures redesigned, a real icon
+bug properly fixed this time, Audio Out moved to the top, and a real
+internal speaker regression root caused from hardware reports.**
+
+- **Measures** no longer opens the numeric keypad screen. `kMeasuresSteps
+  = {1,2,4,8,16}` (a musically useful doubling sequence, not every
+  integer 1-8, `looper.cpp` just multiplies `measures * beats`, any
+  positive integer was always fine, the old 1-8 range was a UI choice,
+  not an engine one), tapping the MEAS button's top half steps up that
+  sequence, the bottom half steps down, both wrapping. `drawBpmMeasBoxes`
+  split into `drawBpmBox`/`drawMeasBox` so the tap only redraws the one
+  box that changed, same discipline as the rest of this session.
+
+- **The I_LOOP icon flip from two passes ago was actually wrong**, confirmed
+  on hardware, "broke completely, nearly missing". Traced properly this
+  time: swapping an arc's two angle arguments assumed fillArc always
+  draws the same arc regardless of argument order. It does not.
+  M5GFX's `fill_arc_helper` computes a `reversed` flag from how start and
+  end compare to each other, not just their values, picking a "major" or
+  "minor" arc, so swapping silently switched a roughly 300 degree ring
+  into a roughly 60 degree sliver. The correct fix needed no change to
+  the arc at all: its own two angles (300, 240) sum to 180 mod 360, which
+  is exactly the condition for that arc's covered angle set to already be
+  its own mirror image across the flip axis, confirmed by expanding both
+  angles' actual covered ranges by hand, not just asserting it. Only the
+  triangle (the arrowhead, genuinely asymmetric) needed its points
+  flipped, and did, correctly, in the original attempt.
+
+- **Audio Out moved to the top of Config**, requested directly, safe
+  because `pressConfig` finds it by pointer identity, not a hardcoded
+  index.
+
+- **Internal speaker root cause, from real hardware reports**: Int (and
+  Int+USB) sounded "glitchy and garbled, low and chopped up, almost ring
+  mod, with tiny bits missing", constantly, not intermittently. Traced to
+  `Speaker_Class`'s own defaults: `task_priority` 2, well below this
+  project's audio task (5), and `task_pinned_core` `~0`, meaning
+  M5Unified leaves it to FreeRTOS which core to run its background task
+  on, unlike everything else in this project, which pins deliberately.
+  Landing on the same core as the audio task would starve it, since the
+  higher priority audio task preempts it whenever both want to run,
+  meaning the release callback (and the 2 alternating buffers depending
+  on it) could easily fall behind the roughly 2.7ms cadence blocks
+  actually arrive at, forcing the "drop rather than corrupt" fallback to
+  trigger constantly instead of rarely, exactly matching "constantly",
+  not "occasionally". Fixed in `beginInternalSpeaker()`: reads
+  `M5.Speaker.config()`, sets `task_pinned_core` to whichever core the
+  audio task is NOT pinned to, writes it back before `begin()`. Also
+  bumped from 2 buffers to 3 for a little extra margin against whatever
+  scheduling jitter is left on its own core, cheap insurance once the
+  real fix (the pinning) is in.
+
+- **Loud pop on reboot, both Int and Ext, looked up**: a software reset
+  (`esp_restart()`) does not wind peripherals down first, whatever the
+  codec or internal speaker's DAC/amp was last outputting cuts off mid
+  stream, heard as a pop, a well known class of issue on audio hardware
+  generally, not specific to this board, standard fix is muting before
+  the deliberate reset. New `audio_io::muteBeforeReboot()` (`device.
+  setMute(true)` for Module, `M5.Speaker.stop()` for Internal, then a
+  50ms settle delay), called from the Audio Out picker's Apply button
+  right before `esp_restart()`, the only place this project calls it.
+  Only covers reboots this project's own code actually triggers, a real
+  power button hold or cold boot has no running code to do any muting
+  first, that case is not fixable in software, worth knowing if the pop
+  still happens outside the Apply button specifically.
+
+- **Ext+USB intermittent pops, "many min apart... every few sec when
+  playing... overloads quicker with a ton of notes", not yet fixed, but
+  a concrete lever already exists**: `usb_audio_out::writeBlock()`
+  (scale loop plus `tud_audio_write()`, confirmed a fast, non blocking
+  ring buffer push, not itself likely to stall) runs in the same audio
+  task, same iteration, as ModuleAudio's blocking `device.play()`. Even
+  cheap extra per block work, added on top of an already marginal render
+  under heavy polyphony (the known, largely mitigated but not eliminated
+  6 voice cost), is plausibly what occasionally tips a block over its
+  time budget into a ModuleAudio underrun, matching both "more notes
+  makes it worse" and why the USB feed itself sounds clean (nothing
+  dropped there, the pop is specifically ModuleAudio's write missing its
+  window). This is exactly what Out Buffer (twenty seventh pass) was
+  built for: worth the user trying a depth of 2-3 there directly against
+  this specific symptom before any more code changes, not yet confirmed
+  either way.
+
+Nothing in this pass confirmed on hardware yet except by report (the bugs
+being fixed), the fixes themselves are new. `LOOPANINI_VERSION` bumped to
+v0.1.11.
+
+**Update 2026-09-26 (thirty first pass): the real internal speaker bug,
+task pinning was real but not the whole story.** User reported the
+glitching got MORE consistently ring mod like after the pinning fix, not
+less, the opposite of what a scheduling contention fix should do if it
+were the whole story, a genuinely useful signal, not just "still broken".
+
+Traced properly instead of tuning the same knob again: re-read
+`loopanini.ino`'s `audioTask()` with fresh eyes. `audio_io::writeBlock()`
+failing already had a comment explaining its `vTaskDelay(1)` exists
+because "nothing else in this loop ever waits" for anything on a
+successful write, that line is the tell. ModuleAudio's `device.play()` is
+the ONLY thing in this whole loop that ever blocks, which means it is
+also the only thing that has EVER paced this audio task to real time.
+`M5.Speaker.playRaw()` never blocks. So with `ANALOG_INTERNAL` active,
+nothing paces this task at all: it renders, mixes, and calls
+`writeInternal()` as fast as render and mix cost allow, typically under
+1ms per block per this project's own `render_us` logging, against a
+2.7ms real time budget (128 samples at 48kHz), meaning it was racing
+2-3x realtime. No number of buffers and no core pinning fixes an
+unpaced producer outrunning a fixed rate consumer, that is a hard limit,
+not a tuning problem, pinning only made the consumer's OWN 48kHz pace
+more reliable, which is exactly why the resulting periodic overrun
+pattern got MORE regular instead of less, the signal was correctly read.
+
+Fixed at the actual root: `writeInternal()` now waits for a genuinely
+free buffer slot before proceeding, bounded to 4000us (a little over one
+block's nominal 2.7ms) so a truly stuck background task can never hang
+the audio task indefinitely, still falls through to the existing "drop
+rather than corrupt" and the caller's own `vTaskDelay(1)`/`write_failures`
+handling if that bound is ever hit for real. This restores the exact same
+real time pacing `device.play()`'s blocking already gives the ModuleAudio
+path for free, just built explicitly for the path that never had it.
+`write_failures` (already logged once a second) should read at or near 0
+in Int mode after this, same as Ext always has, worth checking on
+hardware as direct confirmation this is actually fixed, not just
+quieter. `LOOPANINI_VERSION` bumped to v0.1.12.
+
+**Update 2026-09-26 (thirty second pass): Int+USB was browning out the
+board, a real power problem, plus one more attempt at the Ext reboot
+pop.** User reported the aux reboot pop still happens, right before the
+new session's own boot sequence starts, accepted that this may not be
+fixable ("oh well if we cant"), and separately, something much more
+serious: Int+USB now "loudly burps and then restarts", repeatedly,
+stuck in a loop.
+
+The boot log made this diagnosable, not just describable: `last reset
+was: power on`, specifically, not brownout, not panic, not a watchdog,
+`resetReasonName()` (loopanini.ino) gives each of those its own distinct
+string and this was genuinely `ESP_RST_POWERON`. That reset reason only
+fires from a voltage collapse deep enough to trip the chip's actual
+power-on-reset circuit, a much harder drop than the brownout detector's
+own (gentler, software configured) threshold, so this is a real current
+draw problem, not a code crash. `beginInternalSpeaker()` had set `M5.
+Speaker.setVolume(255)`, its own max, mirroring ModuleAudio's own "max
+volume for bring up" comment without noticing CoreS3's onboard speaker
+amp is a much smaller, more power constrained part than a full external
+codec, especially stacked with USB's own draw and everything else this
+board runs. Turned down to 80, clearly audible, well under max, a
+genuine fix for a real hardware constraint, not a preference.
+
+Worth naming honestly: the previous pass's pacing fix (writeInternal
+waiting for a real free slot) most likely made this worse, not better,
+by removing a mechanism that was accidentally hiding it. Frequently
+dropped, choppy audio has a lower average duty cycle than smooth,
+continuous audio at the same peak level, so fixing the audio quality bug
+plausibly raised the average current draw enough to cross a line that
+had, until then, gone unnoticed. Both fixes are correct and both were
+needed, worth remembering that a fix can genuinely make a DIFFERENT,
+previously masked problem more visible rather than introducing a new one
+of its own.
+
+Ext reboot pop: widened `muteBeforeReboot()`'s settle delay from 50ms to
+150ms, still muting first (device.setMute(true) for Module, M5.Speaker.
+stop() for Internal). Longer settle time is the only lever a register
+level mute call actually has, an analog output stage's own settling
+behavior is not something software can force faster. If this still
+doesn't clear it, this codec most likely simply lacks a dedicated mute
+relay or soft start circuit, and some residual pop on a hard reset may
+be a real hardware limitation rather than something fixable in software,
+consistent with the user's own "oh well" already covering that outcome.
+
+Not yet confirmed on hardware. `LOOPANINI_VERSION` bumped to v0.1.13.
+
+**Update 2026-09-26 (thirty third pass): the boot loop was a real bug in
+the previous pass's own wait, not the volume/power issue at all.** User
+reported the exact same bad audio plus a hard boot loop, screen never
+loading. The boot log's own reset reason gave the real cause directly:
+`TASK WATCHDOG, a task starved the idle task`, not brownout, not power
+on this time, a completely different mechanism than the thirty second
+pass diagnosed.
+
+The bug was in the thirty first pass's own fix: `writeInternal()`'s
+bounded wait used `delayMicroseconds()`, which is a tight cycle counter
+spin, it does not yield to the FreeRTOS scheduler at all. Running on core
+0 (`LOOPANINI_AUDIO_TASK_CORE`), that spin meant core 0's own idle task,
+whose only job is feeding that core's task watchdog, never got scheduled,
+exactly what the reset reason says happened. Ironic given loopanini.ino's
+own `audioTask()` already has a comment explaining this exact failure
+mode next to its `vTaskDelay(1)` on a failed write, the same mistake got
+made again one layer down instead of reusing the lesson already written
+down.
+
+Fixed by switching the wait to `vTaskDelay(1)` in a bounded loop (4 ticks,
+matching the old ~4ms bound at this project's ~1ms tick rate, same
+assumption `audioTask()`'s own `vTaskDelay(1)` already relies on).
+`vTaskDelay` actually yields, so the idle task, the scheduler generally,
+and possibly the internal speaker's own background task (now pinned to
+the other core, thirty first pass) all get a real chance to run during
+the wait, instead of core 0 being tied up spinning uselessly. Needed new
+`#include <freertos/FreeRTOS.h>` / `<freertos/task.h>` in audio_io.cpp
+for `vTaskDelay`.
+
+Also addressed: user felt muting needs to happen further into boot, since
+the burp comes a while in, only after also confirming the reduced volume
+(thirty second pass) made it quieter. Once this pass's actual fix lands,
+the burp-then-crash-loop this was describing should stop happening at
+all, that specific burp was the crash itself producing noise mid glitch,
+not a graceful shutdown transient `muteBeforeReboot()` could ever have
+reached, that function only ever runs from the Audio Out picker's
+deliberate Apply button, never from an unplanned watchdog reset. If a
+quieter, non crashing pop still remains after this fix, on either
+transport, that would be the same already known, not fully solved reboot
+pop (thirty first/thirty second passes), a real but separate issue.
+
+Not yet confirmed on hardware, this is the most urgent fix in this
+session to verify, it was blocking the screen from loading at all.
+`LOOPANINI_VERSION` bumped to v0.1.14.
+
+**Update 2026-09-26 (thirty fourth pass): the internal speaker wait
+redone a third time, with a semaphore instead of a poll.** User confirmed
+Ext+USB stayed clean, narrowing this specifically to whichever mode has
+Int active, and that the crash was gone but the garbling ("bitcrush
+ringmod") was not, after the vTaskDelay(1) fix. Useful data: it ruled out
+USB itself as a cause (Ext+USB clean means USB isn't inherently the
+problem) and confirmed this task's own cadence, not USB, is the shared
+mechanism when Int is active (matches: this same audio task feeds both
+paths every block, so whatever stalls its iteration stalls both).
+
+Reasoned through why vTaskDelay(1) polling, while a genuine fix for the
+crash, was never going to be precise enough on its own: this project's
+poll tick is roughly 1ms, the target block period is roughly 2.7ms
+(AMY_BLOCK_SIZE at LOOPANINI_SAMPLE_RATE), a ratio coarse enough that
+most blocks need at least one tick's wait, and a wait that lands a little
+short or a little long of the real period, tick after tick, accumulates
+into exactly the kind of periodic drift "ring mod" describes. Polling on
+a timer was never going to track a hardware clocked consumer precisely,
+regardless of the poll interval chosen.
+
+Replaced with what the library's own docs actually describe: a
+`SemaphoreHandle_t`, given once by `onSpkBufferReleased` (the real time
+reference, whichever instant the background task is actually done with a
+buffer) and taken by `writeInternal`'s wait, still bounded by an absolute
+deadline (4ms) so a genuinely stuck background task can never hang the
+audio task. One real subtlety, documented in the code: a give is not
+necessarily for the exact slot index `writeInternal` is waiting on (3
+buffers rotate), so `spkFree[i]` is re-checked after every take rather
+than trusting one give to mean this specific index is ready.
+
+If this still garbles Int specifically, worth checking on hardware next:
+`write_failures` (already logged once a second) climbing would mean
+blocks are still genuinely being dropped, still a pacing problem, worth
+more of this same investigation; `write_failures` staying near 0 while it
+still sounds bad would point somewhere else entirely, most likely
+something in the actual `playRaw()` call parameters (stereo interleaving,
+repeat count) rather than timing, worth checking against a working
+example next rather than tuning this same wait a fourth time.
+
+Not yet confirmed on hardware. `LOOPANINI_VERSION` bumped to v0.1.15.
 
 ### Status 2026-09-23: aux in is live
 

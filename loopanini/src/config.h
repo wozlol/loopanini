@@ -5,6 +5,11 @@
 // includes this file too (see src/USB_Host_Shield_Library_2.0/avrpins.h), so
 // nothing Arduino specific may go in here.
 
+// Shown on the boot splash so a reflash is visually confirmed rather than
+// assumed, bump this every time a change goes out for testing, not tied to
+// any release process, just "did this specific build actually land."
+#define LOOPANINI_VERSION "v0.1.15"
+
 // ===========================================================================
 // SWITCHES YOU MIGHT WANT TO FLIP. Everything below the next banner is a fact
 // about the hardware, read the pin budget before changing any of it.
@@ -192,6 +197,29 @@
 #ifndef LOOPANINI_SD_KIT_DIR
 #define LOOPANINI_SD_KIT_DIR "/kits/000"  // auto-loaded at boot if present
 #endif
+// The Mixer/AMY screen's "SD Card" patch category browses folders directly
+// inside this one, each a sample kit (sample_bank::loadDrumKit's existing
+// flat-folder-of-note-numbered-wavs convention, reused here for any of the
+// 4 channels, not just channel 10 drums). Rooted at a subfolder, not the
+// SD card's own root, specifically so LOOPANINI_SD_CUSTOM_DIR below (and
+// anything else on the card) doesn't also show up as a bogus "kit".
+#ifndef LOOPANINI_SD_VOICES_DIR
+#define LOOPANINI_SD_VOICES_DIR "/Samples"
+#endif
+// Where a patch captured from the AMYboard/Tulip web editor over MIDI
+// sysex gets saved, one file per patch, filename a placeholder the user
+// can rename from a computer, not hidden. See FIRMWARE_PLAN.md's Synth
+// and sampler section for the sysex/file format this follows (AMY's own,
+// not invented here).
+#ifndef LOOPANINI_SD_CUSTOM_DIR
+#define LOOPANINI_SD_CUSTOM_DIR "/Custom"
+#endif
+// AMY's own user patch range is fixed at 1024-1055 (32 slots,
+// amy_default_config's max_memory_patches), not a Loopanini convention,
+// see docs/synth.md's "User patches" section. Loaded Custom patches cycle
+// through this range, oldest evicted first once all 32 are in use.
+#define LOOPANINI_USER_PATCH_BASE 1024
+#define LOOPANINI_USER_PATCH_COUNT 32
 // PCM preset numbers we hand out for SD-loaded samples. Picked well clear of
 // the baked-in TR-808 bank (0-10) and AMY's synth patch numbers (0-255 Juno/
 // DX7, 256 piano, 1024+ user patches), which are a separate namespace from

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 // Loads 16 bit PCM WAV files from the SD card into PSRAM as AMY PCM presets
@@ -37,5 +38,29 @@ int drumPreset(int note);
 bool loadPitchedSample(int chIndex, const char *path);
 bool hasPitched(int chIndex);
 int pitchedPreset(int chIndex);
+
+// Lists subfolder names (not full paths, not recursive) directly inside
+// `root`, for the SD Card picker to browse. Writes at most maxNames
+// entries, each null terminated within its 24 byte row, and returns how
+// many it found (0 if root does not exist or the SD card is not present).
+int listFolders(const char *root, char names[][24], int maxNames);
+
+// Saves an AMY wire protocol patch string (see FIRMWARE_PLAN.md's Synth
+// and sampler section, this is the same text format patches.h's own
+// baked in patches use, AMY has no other on-disk patch format) as a new
+// file in LOOPANINI_SD_CUSTOM_DIR, filename a numbered placeholder
+// (patch001.txt, patch002.txt, ...), the next free number. Returns false
+// if the SD card is not present or the write failed.
+bool saveCustomPatch(const char *wireText);
+
+// Lists saved Custom patch filenames (not full paths), same shape as
+// listFolders. Reads the file back with loadCustomPatch, by full path
+// (this call gives names only, the caller builds the path).
+int listCustomPatches(char names[][24], int maxNames);
+
+// Reads a Custom patch file's whole contents (the wire text saveCustomPatch
+// wrote) into out, null terminated. Returns false if it didn't fit or the
+// file could not be read.
+bool loadCustomPatch(const char *filename, char *out, size_t outSize);
 
 }  // namespace sample_bank

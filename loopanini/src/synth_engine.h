@@ -42,4 +42,15 @@ int loadDrumKit(const char *dir);
 // through this yet, see FIRMWARE_PLAN.md.
 bool routeDrumNote(const uint8_t *msg3);
 
+// Replays a saved Custom patch's wire text (sample_bank::loadCustomPatch),
+// straight through AMY's own amy_send_wire_from_sysex(), the same entry
+// point a real incoming SYSEX patch dump goes through, see docs/midi.md.
+// Best effort, not yet confirmed on hardware: whether this needs a
+// num_voices/patch_number set up on the target synth first, the way
+// docs/synth.md's "User patches" section builds one command at a time
+// with patch=SLOT on each, or whether replaying the raw text as captured
+// is enough on its own, is the open question the next hardware test
+// should answer, see FIRMWARE_PLAN.md's Synth and sampler section.
+void applyCustomWire(char *wireText);
+
 }  // namespace synth_engine

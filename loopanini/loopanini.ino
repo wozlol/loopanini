@@ -210,7 +210,10 @@ void audioTask(void *) {
       // is what phase 2 bring up looked like.
       vTaskDelay(1);
     }
-    usb_audio_out::writeBlock(block, AMY_BLOCK_SIZE);
+    // Gated on the Audio Out preference (Config screen): picking Aux or
+    // Int alone should actually turn USB off, not leave it silently
+    // running anyway, see audio_io.h's usbAudioEnabled.
+    if (audio_io::usbAudioEnabled()) usb_audio_out::writeBlock(block, AMY_BLOCK_SIZE);
     blocks_rendered = blocks_rendered + 1;
     const uint32_t block_us = micros() - block_t0;
     if (block_us > block_us_max) block_us_max = block_us;
@@ -260,7 +263,8 @@ void setup() {
   M5.Display.setTextSize(3);
   M5.Display.drawString("LOOPANINI", M5.Display.width() / 2, M5.Display.height() / 2 - 12);
   M5.Display.setTextSize(1);
-  M5.Display.drawString("starting...", M5.Display.width() / 2, M5.Display.height() / 2 + 20);
+  M5.Display.drawString(LOOPANINI_VERSION " starting...", M5.Display.width() / 2,
+                         M5.Display.height() / 2 + 20);
 
   // Named explicitly so the host OS and DAWs show "Loopanini," not a
   // generic default, for the device as a whole. USBMIDI's own name (set in
@@ -282,6 +286,14 @@ void setup() {
   // into the void. Never waits if none shows up, and '?' reprints it later.
   debug_io::waitForHost(4000);
   debug_io::out().printf("loopanini: last reset was: %s\n", resetReasonName(boot_reset_reason));
+  // setup() and loop() are the same FreeRTOS task (Arduino's loopTask), so
+  // whatever core setup() prints here is the core every UI draw, including
+  // the Mixer meter's pushSprite() calls, runs on for the rest of this
+  // boot. Printed once to settle, without guessing, whether that core is
+  // actually separate from LOOPANINI_AUDIO_TASK_CORE (config.h), see the
+  // twenty fourth pass note in FIRMWARE_PLAN.md.
+  debug_io::out().printf("loopanini: UI task (setup/loop) is running on core %d, audio task is pinned to core %d.\n",
+                          xPortGetCoreID(), LOOPANINI_AUDIO_TASK_CORE);
   if (boot_reset_reason == ESP_RST_PANIC && esp_core_dump_image_check() == ESP_OK) {
     esp_core_dump_summary_t *sum = (esp_core_dump_summary_t *)malloc(sizeof(esp_core_dump_summary_t));
     if (sum != nullptr && esp_core_dump_get_summary(sum) == ESP_OK) {

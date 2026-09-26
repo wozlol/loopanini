@@ -15,6 +15,7 @@ int8_t drumOsc[128];
 uint16_t nextDrumOsc = 0;
 
 extern "C" int16_t *pcm_load(uint16_t, uint32_t, uint32_t, uint8_t, float, uint32_t, uint32_t);
+extern "C" void amy_send_wire_from_sysex(char *message);
 
 // Fires from inside amy_overload_check() (called every block from
 // loopanini.ino's audioTask, see its comment) when sustained render load
@@ -37,6 +38,20 @@ void begin() {
   amy_config.features.startup_bleep = 1;
   amy_config.features.default_synths = 1;  // synths on MIDI ch 1, 2, 10
   amy_config.amy_external_overload_hook = onOverload;
+  // The failsafe itself is destructive in a way its own "doot doot doot"
+  // sound effect does not suggest: amy_overload_failsafe() calls amy.c's
+  // amy_reset_oscs(), which runs instruments_reset() and pcm_unload_all_
+  // presets(), wiping every channel's synth assignment (default_synths,
+  // set up once below, nothing recreates it after this) and every SD
+  // loaded sample, permanently, the instant it fires once. That is a real
+  // hardware regression this project hit (MIDI stopped reaching AMY on
+  // every transport after "a few notes", the arpeggio itself, right after
+  // boot), traced to this. Disabled by threshold=0 (amy_overload_check's
+  // own early return before the destructive branch, confirmed from
+  // amy.c, not guessed), the render load measurement this project's debug
+  // line depends on still updates every block regardless, only the
+  // failsafe action is off.
+  amy_config.overload_threshold = 0;
 
   // ModuleAudio (audio_io.h) owns I2S. Our own MIDI transports (midi_io.h)
   // own USB and DIN and feed AMY's parser directly, so AMY does neither
@@ -138,5 +153,7 @@ bool routeDrumNote(const uint8_t *msg3) {
   // explicit note-off handling needed, so a note-off is simply swallowed.
   return true;
 }
+
+void applyCustomWire(char *wireText) { amy_send_wire_from_sysex(wireText); }
 
 }  // namespace synth_engine
